@@ -11,6 +11,7 @@ import { BudgetsList } from "@/components/modules/budgets/BudgetsList";
 import { BudgetForm } from "@/components/modules/budgets/BudgetForm";
 import { BudgetDetail } from "@/components/modules/budgets/BudgetDetail";
 import { AiAssistant } from "@/components/modules/ai-assistant/AiAssistant";
+import { ReportsDashboard } from "@/components/modules/reports/ReportsDashboard";
 import { FolderKanban } from "lucide-react";
 
 export function TabContent() {
@@ -34,13 +35,20 @@ export function TabContent() {
   const key = activeTab.moduleKey;
   const params = activeTab.params ?? {};
 
+  // Unified ID resolution: support both entity-specific params (e.g. projectId)
+  // and generic params.id — the latter is used by AI linked content cards
+  const resolveId = (specificKey: string): number | undefined => {
+    const v = params[specificKey] ?? params.id;
+    return v != null ? Number(v) : undefined;
+  };
+
   switch (key) {
     case "partners":
       return <PartnersList />;
     case "partners-form":
       return (
         <PartnerForm
-          partnerId={params.partnerId as number | undefined}
+          partnerId={resolveId("partnerId")}
           tabId={activeTab.id}
           readOnly={activeTab.tabType === "view"}
         />
@@ -50,7 +58,7 @@ export function TabContent() {
     case "projects-form":
       return (
         <ProjectForm
-          projectId={params.projectId as number | undefined}
+          projectId={resolveId("projectId")}
           tabId={activeTab.id}
           readOnly={activeTab.tabType === "view"}
         />
@@ -60,7 +68,7 @@ export function TabContent() {
     case "quotes-form":
       return (
         <QuoteForm
-          quoteId={params.quoteId as number | undefined}
+          quoteId={resolveId("quoteId")}
           tabId={activeTab.id}
           readOnly={activeTab.tabType === "view"}
         />
@@ -70,18 +78,20 @@ export function TabContent() {
     case "budgets-detail":
       return (
         <BudgetDetail
-          budgetId={params.budgetId as number}
+          budgetId={resolveId("budgetId") as number}
           tabId={activeTab.id}
         />
       );
     case "budgets-form":
       return (
         <BudgetForm
-          budgetId={params.budgetId as number | undefined}
+          budgetId={resolveId("budgetId")}
           tabId={activeTab.id}
           readOnly={activeTab.tabType === "view"}
         />
       );
+    case "reports":
+      return <ReportsDashboard />;
     case "ai-assistant":
       return <AiAssistant />;
     default:
