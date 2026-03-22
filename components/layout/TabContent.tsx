@@ -1,0 +1,96 @@
+"use client";
+
+import { useTabStore } from "@/stores/tab-store";
+import { PartnersList } from "@/components/modules/partners/PartnersList";
+import { PartnerForm } from "@/components/modules/partners/PartnerForm";
+import { ProjectsList } from "@/components/modules/projects/ProjectsList";
+import { ProjectForm } from "@/components/modules/projects/ProjectForm";
+import { QuotesList } from "@/components/modules/quotes/QuotesList";
+import { QuoteForm } from "@/components/modules/quotes/QuoteForm";
+import { BudgetsList } from "@/components/modules/budgets/BudgetsList";
+import { BudgetForm } from "@/components/modules/budgets/BudgetForm";
+import { BudgetDetail } from "@/components/modules/budgets/BudgetDetail";
+import { AiAssistant } from "@/components/modules/ai-assistant/AiAssistant";
+import { FolderKanban } from "lucide-react";
+
+export function TabContent() {
+  const tabs = useTabStore((s) => s.tabs);
+  const activeTabId = useTabStore((s) => s.activeTabId);
+  const activeTab = tabs.find((t) => t.id === activeTabId);
+
+  if (!activeTab) {
+    return (
+      <div className="flex-1 flex items-center justify-center bg-white">
+        <div className="text-center">
+          <FolderKanban className="mx-auto mb-3 text-[var(--slate-300)]" size={40} />
+          <p className="text-sm text-[var(--slate-400)]">
+            Válasszon egy modult a menüből vagy nyisson új lapot
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const key = activeTab.moduleKey;
+  const params = activeTab.params ?? {};
+
+  switch (key) {
+    case "partners":
+      return <PartnersList />;
+    case "partners-form":
+      return (
+        <PartnerForm
+          partnerId={params.partnerId as number | undefined}
+          tabId={activeTab.id}
+          readOnly={activeTab.tabType === "view"}
+        />
+      );
+    case "projects":
+      return <ProjectsList />;
+    case "projects-form":
+      return (
+        <ProjectForm
+          projectId={params.projectId as number | undefined}
+          tabId={activeTab.id}
+          readOnly={activeTab.tabType === "view"}
+        />
+      );
+    case "quotes":
+      return <QuotesList />;
+    case "quotes-form":
+      return (
+        <QuoteForm
+          quoteId={params.quoteId as number | undefined}
+          tabId={activeTab.id}
+          readOnly={activeTab.tabType === "view"}
+        />
+      );
+    case "budgets":
+      return <BudgetsList />;
+    case "budgets-detail":
+      return (
+        <BudgetDetail
+          budgetId={params.budgetId as number}
+          tabId={activeTab.id}
+        />
+      );
+    case "budgets-form":
+      return (
+        <BudgetForm
+          budgetId={params.budgetId as number | undefined}
+          tabId={activeTab.id}
+          readOnly={activeTab.tabType === "view"}
+        />
+      );
+    case "ai-assistant":
+      return <AiAssistant />;
+    default:
+      return (
+        <div className="flex-1 flex items-center justify-center bg-white">
+          <p className="text-sm text-[var(--slate-400)]">
+            Modul: <strong>{key}</strong> — hamarosan elérhető
+          </p>
+        </div>
+      );
+  }
+}

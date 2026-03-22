@@ -1,5 +1,5 @@
 {
-  "name": "erp2",
+  "name": "erp-2",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,15 +9,26 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.1014.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1014.0",
+    "@aws-sdk/credential-providers": "^3.1014.0",
+    "@supabase/supabase-js": "^2.99.3",
+    "drizzle-orm": "^0.45.1",
+    "jose": "^6.2.2",
+    "lucide-react": "^0.577.0",
     "next": "16.2.0",
+    "postgres": "^3.4.8",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.0",
     "tailwindcss": "^4",
