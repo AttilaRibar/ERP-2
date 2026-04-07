@@ -29,9 +29,9 @@ export async function validateSubcontractorToken(
   // Expired tokens are never valid
   if (new Date(row.expiresAt) < new Date()) return null;
 
-  // Update used_at on first use — conditional WHERE prevents races
+  // Update used_at on first use — conditional WHERE prevents duplicate updates
   if (row.usedAt === null) {
-    void db
+    await db
       .update(subcontractorAccessTokens)
       .set({ usedAt: new Date() })
       .where(

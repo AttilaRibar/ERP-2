@@ -281,11 +281,12 @@ function BillingRow({ billing, token, onUpdated }: BillingRowProps) {
 
 interface SubcontractorPortalProps {
   token: string;
-  /** partnerId is provided by the server-validated page for future use (e.g. deep linking). */
+  /** partnerId is provided by the server-validated page; reserved for future deep-linking use. */
+  // eslint-disable-next-line react/no-unused-prop-types
   partnerId: number;
 }
 
-export function SubcontractorPortal({ token, partnerId: _partnerId }: SubcontractorPortalProps) {
+export function SubcontractorPortal({ token }: SubcontractorPortalProps) {
   const [partner, setPartner] = useState<Partner>(null);
   const [versions, setVersions] = useState<Version[]>([]);
   const [billings, setBillings] = useState<Billing[]>([]);

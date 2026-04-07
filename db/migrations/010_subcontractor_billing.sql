@@ -1,4 +1,5 @@
--- Subcontractor access tokens (magic-link based access for subcontractors)
+-- Replaces Cognito-based auth for subcontractors with token/magic-link access.
+-- Subcontractor access tokens (one token per invite link)
 CREATE TABLE IF NOT EXISTS subcontractor_access_tokens (
     id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     partner_id    BIGINT NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
