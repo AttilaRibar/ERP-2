@@ -5,9 +5,10 @@ import { createPortal } from "react-dom";
 import { ChevronDown } from "lucide-react";
 import { MODULE_REGISTRY } from "@/lib/modules";
 import { useTabStore } from "@/stores/tab-store";
+import type { TabStore } from "@/stores/tab-store";
 import type { ModuleDef } from "@/types/modules";
 
-function DropdownButton({ mod, openTab }: { mod: ModuleDef; openTab: ReturnType<typeof useTabStore>["openTab"] }) {
+function DropdownButton({ mod, openTab }: { mod: ModuleDef; openTab: TabStore["openTab"] }) {
   const [open, setOpen] = useState(false);
   const [rect, setRect] = useState<DOMRect | null>(null);
   const btnRef = useRef<HTMLButtonElement>(null);

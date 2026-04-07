@@ -1,6 +1,17 @@
--- Add cognito_sub to partners table for linking Cognito users to partners
-ALTER TABLE partners ADD COLUMN IF NOT EXISTS cognito_sub TEXT UNIQUE;
-CREATE INDEX IF NOT EXISTS idx_partners_cognito_sub ON partners(cognito_sub);
+-- Subcontractor access tokens (magic-link based access for subcontractors)
+CREATE TABLE IF NOT EXISTS subcontractor_access_tokens (
+    id            BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    partner_id    BIGINT NOT NULL REFERENCES partners(id) ON DELETE CASCADE,
+    token         TEXT NOT NULL UNIQUE,
+    label         TEXT NOT NULL DEFAULT '',
+    expires_at    TIMESTAMPTZ NOT NULL,
+    used_at       TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ,
+    created_by    TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sub_tokens_partner_id ON subcontractor_access_tokens(partner_id);
+CREATE INDEX IF NOT EXISTS idx_sub_tokens_token ON subcontractor_access_tokens(token);
 
 -- Subcontractor billing submissions
 CREATE TABLE IF NOT EXISTS subcontractor_billings (
@@ -12,6 +23,8 @@ CREATE TABLE IF NOT EXISTS subcontractor_billings (
     description      TEXT NOT NULL DEFAULT '',
     status           TEXT NOT NULL DEFAULT 'draft'
                          CHECK (status IN ('draft', 'submitted', 'approved', 'rejected')),
+    period_start     DATE,
+    period_end       DATE,
     submitted_at     TIMESTAMPTZ,
     reviewed_at      TIMESTAMPTZ,
     reviewer_notes   TEXT,

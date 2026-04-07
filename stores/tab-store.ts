@@ -13,7 +13,7 @@ export interface ErpTab {
   isLoading?: boolean;
 }
 
-interface TabStore {
+export interface TabStore {
   tabs: ErpTab[];
   activeTabId: string | null;
   openTab: (tab: Omit<ErpTab, "id" | "tabType"> & { tabType?: TabType }) => string;
