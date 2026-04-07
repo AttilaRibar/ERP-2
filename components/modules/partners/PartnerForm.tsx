@@ -20,6 +20,8 @@ export function PartnerForm({ partnerId, tabId, readOnly }: PartnerFormProps) {
   const openTab = useTabStore((s) => s.openTab);
   const updateTab = useTabStore((s) => s.updateTab);
 
+  const [originalFormData, setOriginalFormData] = useState({ name: "", email: "", phone: "", address: "", taxNumber: "", partnerType: "client" });
+
   const [form, setForm] = useState({
     name: "",
     email: "",
@@ -33,14 +35,16 @@ export function PartnerForm({ partnerId, tabId, readOnly }: PartnerFormProps) {
     if (partnerId) {
       getPartnerById(partnerId).then((data) => {
         if (data) {
-          setForm({
+          const loaded = {
             name: data.name,
             email: data.email ?? "",
             phone: data.phone ?? "",
             address: data.address ?? "",
             taxNumber: data.taxNumber ?? "",
             partnerType: data.partnerType,
-          });
+          };
+          setForm(loaded);
+          setOriginalFormData(loaded);
         }
         setLoading(false);
       });
@@ -61,11 +65,20 @@ export function PartnerForm({ partnerId, tabId, readOnly }: PartnerFormProps) {
 
     setSaving(false);
     if (result.success) {
-      setSuccess(true);
-      setTimeout(() => {
-        closeTab(tabId);
-        openTab({ moduleKey: "partners", title: "Partnerek", color: "#8b5cf6" });
-      }, 500);
+      if (partnerId) {
+        setOriginalFormData(form);
+        setSuccess(true);
+        setTimeout(() => {
+          setSuccess(false);
+          updateTab(tabId, { tabType: "view", title: form.name || `Partner #${partnerId}` });
+        }, 1500);
+      } else {
+        setSuccess(true);
+        setTimeout(() => {
+          closeTab(tabId);
+          openTab({ moduleKey: "partners", title: "Partnerek", color: "#8b5cf6" });
+        }, 800);
+      }
     } else {
       setError(result.error ?? "Hiba történt");
     }
@@ -78,6 +91,17 @@ export function PartnerForm({ partnerId, tabId, readOnly }: PartnerFormProps) {
 
   const handleEdit = () => {
     updateTab(tabId, { tabType: "edit", title: `Partner szerkesztése #${partnerId}` });
+  };
+
+  const handleCancel = () => {
+    if (partnerId != null) {
+      setForm(originalFormData);
+      setError(null);
+      setSuccess(false);
+      updateTab(tabId, { tabType: "view", title: originalFormData.name || `Partner #${partnerId}` });
+    } else {
+      goBack();
+    }
   };
 
   const handleDelete = async () => {
@@ -171,7 +195,7 @@ export function PartnerForm({ partnerId, tabId, readOnly }: PartnerFormProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={goBack}
+                  onClick={handleCancel}
                   className="px-4 py-2 rounded-[6px] text-sm border border-[var(--slate-200)] text-[var(--slate-600)] hover:bg-[var(--slate-50)] cursor-pointer transition-colors"
                 >
                   Mégse

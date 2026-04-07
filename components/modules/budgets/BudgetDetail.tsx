@@ -1,18 +1,23 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { ArrowLeft, Database, GitBranch, Pencil, Trash2 } from "lucide-react";
+import { ArrowLeft, Database, GitBranch, Pencil, Trash2, FileSpreadsheet } from "lucide-react";
 import { getBudgetById, deleteBudget } from "@/server/actions/budgets";
+import { type VersionType } from "@/server/actions/versions";
 import { useTabStore } from "@/stores/tab-store";
 import { VersionGraph } from "./VersionGraph";
 import { VersionComparison } from "./VersionComparison";
+import { MultiVersionComparison } from "./MultiVersionComparison";
 import { BudgetItemsPanel } from "./BudgetItemsPanel";
+import { ImportPanel } from "./ImportPanel";
 
 type DetailView =
   | { type: "data" }
   | { type: "versions" }
-  | { type: "version-items"; versionId: number; versionName: string }
-  | { type: "comparison"; versionAId: number; versionBId: number; nameA: string; nameB: string };
+  | { type: "import" }
+  | { type: "version-items"; versionId: number; versionName: string; versionType: VersionType; partnerName: string | null }
+  | { type: "comparison"; versionAId: number; versionBId: number; nameA: string; nameB: string }
+  | { type: "multi-comparison"; versionIds: number[]; versionNames: string[] };
 
 interface BudgetDetailProps {
   budgetId: number;
@@ -64,13 +69,20 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
     goBack();
   };
 
-  const handleOpenVersion = useCallback((versionId: number, versionName: string) => {
-    setView({ type: "version-items", versionId, versionName });
+  const handleOpenVersion = useCallback((versionId: number, versionName: string, versionType: VersionType = "offer", partnerName: string | null = null) => {
+    setView({ type: "version-items", versionId, versionName, versionType, partnerName });
   }, []);
 
   const handleCompare = useCallback(
     (versionAId: number, versionBId: number, nameA: string, nameB: string) => {
       setView({ type: "comparison", versionAId, versionBId, nameA, nameB });
+    },
+    []
+  );
+
+  const handleMultiCompare = useCallback(
+    (versionIds: number[], versionNames: string[]) => {
+      setView({ type: "multi-comparison", versionIds, versionNames });
     },
     []
   );
@@ -82,10 +94,15 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
   const sidebarItems: { key: string; label: string; icon: typeof Database }[] = [
     { key: "data", label: "Adatok", icon: Database },
     { key: "versions", label: "Verziók", icon: GitBranch },
+    { key: "import", label: "Importálás", icon: FileSpreadsheet },
   ];
 
   const activeSidebarKey =
-    view.type === "version-items" || view.type === "comparison" ? "versions" : view.type;
+    view.type === "version-items" || view.type === "comparison" || view.type === "multi-comparison" ? "versions" : view.type;
+
+  const handleImported = useCallback((versionId: number, versionName: string, versionType: VersionType, partnerName: string | null) => {
+    setView({ type: "version-items", versionId, versionName, versionType, partnerName });
+  }, []);
 
   if (loading) {
     return (
@@ -126,7 +143,7 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
           {sidebarItems.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
-              onClick={() => setView({ type: key as "data" | "versions" })}
+              onClick={() => setView({ type: key as "data" | "versions" | "import" })}
               className={`flex items-center gap-2 px-3 py-[7px] rounded-[6px] text-xs transition-colors cursor-pointer ${
                 activeSidebarKey === key
                   ? "bg-[var(--violet-100)] text-[var(--violet-900)] font-medium"
@@ -210,6 +227,7 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
             budgetId={budgetId}
             onOpenVersion={handleOpenVersion}
             onCompare={handleCompare}
+            onMultiCompare={handleMultiCompare}
           />
         )}
 
@@ -217,6 +235,8 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
           <BudgetItemsPanel
             versionId={view.versionId}
             versionName={view.versionName}
+            versionType={view.versionType}
+            partnerName={view.partnerName}
             budgetId={budgetId}
             onBack={handleBackToVersions}
             onVersionCreated={handleOpenVersion}
@@ -230,6 +250,22 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
             nameA={view.nameA}
             nameB={view.nameB}
             onBack={handleBackToVersions}
+          />
+        )}
+
+        {view.type === "multi-comparison" && (
+          <MultiVersionComparison
+            versionIds={view.versionIds}
+            versionNames={view.versionNames}
+            onBack={handleBackToVersions}
+          />
+        )}
+
+        {view.type === "import" && (
+          <ImportPanel
+            budgetId={budgetId}
+            onClose={() => setView({ type: "versions" })}
+            onImported={handleImported}
           />
         )}
       </div>

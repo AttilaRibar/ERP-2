@@ -158,11 +158,21 @@ export const versions = pgTable(
       .references(() => budgets.id, { onDelete: "cascade" }),
     parentId: bigint("parent_id", { mode: "number" }),
     versionName: text("version_name").notNull(),
+    versionType: text("version_type").notNull().default("offer"),
+    partnerId: bigint("partner_id", { mode: "number" }).references(() => partners.id, {
+      onDelete: "set null",
+    }),
+    originalFileName: text("original_file_name"),
+    originalFilePath: text("original_file_path"),
+    notes: text("notes"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   },
   (t) => [
     index("idx_versions_budget_id").on(t.budgetId),
     index("idx_versions_parent_id").on(t.parentId),
+    index("idx_versions_version_type").on(t.versionType),
+    index("idx_versions_partner_id").on(t.partnerId),
+    check("versions_version_type_check", sql`${t.versionType} IN ('offer', 'contracted', 'unpriced')`),
   ]
 );
 
@@ -170,6 +180,10 @@ export const versionsRelations = relations(versions, ({ one }) => ({
   budget: one(budgets, {
     fields: [versions.budgetId],
     references: [budgets.id],
+  }),
+  partner: one(partners, {
+    fields: [versions.partnerId],
+    references: [partners.id],
   }),
 }));
 
@@ -196,18 +210,116 @@ export const budgetItems = pgTable(
       .notNull()
       .default("0"),
     notes: text("notes").notNull().default(""),
+    sectionCode: uuid("section_code"),
+    alternativeOfItemCode: uuid("alternative_of_item_code"),
     isDeleted: boolean("is_deleted").notNull().default(false),
   },
   (t) => [
     index("idx_budget_items_version_id").on(t.versionId),
     index("idx_budget_items_item_code").on(t.itemCode),
     index("idx_budget_items_version_item").on(t.versionId, t.itemCode),
+    index("idx_budget_items_section_code").on(t.sectionCode),
+    index("idx_budget_items_alt_of").on(t.alternativeOfItemCode),
   ]
 );
 
 export const budgetItemsRelations = relations(budgetItems, ({ one }) => ({
   version: one(versions, {
     fields: [budgetItems.versionId],
+    references: [versions.id],
+  }),
+}));
+
+// ============================================================
+// 7. BUDGET SECTIONS (Fejezetek)
+// ============================================================
+export const budgetSections = pgTable(
+  "budget_sections",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    versionId: bigint("version_id", { mode: "number" })
+      .notNull()
+      .references(() => versions.id, { onDelete: "cascade" }),
+    sectionCode: uuid("section_code").notNull(),
+    parentSectionCode: uuid("parent_section_code"),
+    name: text("name").notNull(),
+    sequenceNo: integer("sequence_no").notNull().default(0),
+    isDeleted: boolean("is_deleted").notNull().default(false),
+  },
+  (t) => [
+    index("idx_budget_sections_version_id").on(t.versionId),
+    index("idx_budget_sections_section_code").on(t.sectionCode),
+  ]
+);
+
+export const budgetSectionsRelations = relations(budgetSections, ({ one }) => ({
+  version: one(versions, {
+    fields: [budgetSections.versionId],
+    references: [versions.id],
+  }),
+}));
+
+// ============================================================
+// 8. COST SCENARIOS (Költség-szcenáriók)
+// ============================================================
+export const costScenarios = pgTable(
+  "cost_scenarios",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    projectId: bigint("project_id", { mode: "number" })
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    description: text("description").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [index("idx_cost_scenarios_project_id").on(t.projectId)]
+);
+
+export const costScenariosRelations = relations(costScenarios, ({ one, many }) => ({
+  project: one(projects, {
+    fields: [costScenarios.projectId],
+    references: [projects.id],
+  }),
+  layers: many(costScenarioLayers),
+}));
+
+// ============================================================
+// 9. COST SCENARIO LAYERS (Szcenárió-rétegek)
+// ============================================================
+export const costScenarioLayers = pgTable(
+  "cost_scenario_layers",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    scenarioId: bigint("scenario_id", { mode: "number" })
+      .notNull()
+      .references(() => costScenarios.id, { onDelete: "cascade" }),
+    versionId: bigint("version_id", { mode: "number" })
+      .notNull()
+      .references(() => versions.id, { onDelete: "cascade" }),
+    layerOrder: integer("layer_order").notNull().default(0),
+    label: text("label").notNull().default(""),
+    /** Which price component this layer contributes: 'both' | 'material' | 'fee' */
+    priceComponent: text("price_component").notNull().default("both"),
+    /** Use the cheapest alternative for each item in this layer */
+    useCheapestAlternative: boolean("use_cheapest_alternative").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index("idx_cost_scenario_layers_scenario_id").on(t.scenarioId),
+    index("idx_cost_scenario_layers_version_id").on(t.versionId),
+    uniqueIndex("uq_cost_scenario_layers_order").on(t.scenarioId, t.layerOrder),
+  ]
+);
+
+export const costScenarioLayersRelations = relations(costScenarioLayers, ({ one }) => ({
+  scenario: one(costScenarios, {
+    fields: [costScenarioLayers.scenarioId],
+    references: [costScenarios.id],
+  }),
+  version: one(versions, {
+    fields: [costScenarioLayers.versionId],
     references: [versions.id],
   }),
 }));

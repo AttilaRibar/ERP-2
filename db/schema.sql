@@ -123,6 +123,28 @@ CREATE INDEX IF NOT EXISTS idx_budget_items_version_id   ON budget_items(version
 CREATE INDEX IF NOT EXISTS idx_budget_items_item_code    ON budget_items(item_code);
 CREATE INDEX IF NOT EXISTS idx_budget_items_version_item ON budget_items(version_id, item_code);
 
+-- Fejezet-hivatkozás tételenként (nullable – ha nincs fejezetbe sorolva)
+ALTER TABLE budget_items ADD COLUMN IF NOT EXISTS section_code UUID;
+CREATE INDEX IF NOT EXISTS idx_budget_items_section_code ON budget_items(section_code);
+
+-- ============================================================
+-- 7. BUDGET SECTIONS (Fejezetek – hierarchikus delta store)
+-- ============================================================
+CREATE TABLE IF NOT EXISTS budget_sections (
+    id                   BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    version_id           BIGINT NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
+    -- Fejezet egyedi kódja (UUID) – verziókon átívelő azonosítás (mint az item_code)
+    section_code         UUID NOT NULL,
+    -- Szülő fejezet kódja (nullable – gyökérfejezeteknél NULL)
+    parent_section_code  UUID,
+    name                 TEXT NOT NULL,
+    sequence_no          INTEGER NOT NULL DEFAULT 0,
+    is_deleted           BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX IF NOT EXISTS idx_budget_sections_version_id   ON budget_sections(version_id);
+CREATE INDEX IF NOT EXISTS idx_budget_sections_section_code ON budget_sections(section_code);
+
 -- ============================================================
 -- HASZNOS NÉZETEK
 -- ============================================================

@@ -22,6 +22,8 @@ export function ProjectForm({ projectId, tabId, readOnly }: ProjectFormProps) {
   const openTab = useTabStore((s) => s.openTab);
   const updateTab = useTabStore((s) => s.updateTab);
 
+  const [originalFormData, setOriginalFormData] = useState({ name: "", startDate: "", endDate: "", clientId: "", warrantyMonths: "12", status: "active" });
+
   const [form, setForm] = useState({
     name: "",
     startDate: "",
@@ -39,14 +41,16 @@ export function ProjectForm({ projectId, tabId, readOnly }: ProjectFormProps) {
       if (projectId) {
         const data = await getProjectById(projectId);
         if (data) {
-          setForm({
+          const loaded = {
             name: data.name,
             startDate: data.startDate ?? "",
             endDate: data.endDate ?? "",
             clientId: data.clientId?.toString() ?? "",
             warrantyMonths: data.warrantyMonths.toString(),
             status: data.status,
-          });
+          };
+          setForm(loaded);
+          setOriginalFormData(loaded);
         }
       }
       setLoading(false);
@@ -68,11 +72,20 @@ export function ProjectForm({ projectId, tabId, readOnly }: ProjectFormProps) {
 
     setSaving(false);
     if (result.success) {
-      setSuccess(true);
-      setTimeout(() => {
-        closeTab(tabId);
-        openTab({ moduleKey: "projects", title: "Projektek", color: "#06b6d4" });
-      }, 500);
+      if (projectId) {
+        setOriginalFormData(form);
+        setSuccess(true);
+        setTimeout(() => {
+          setSuccess(false);
+          updateTab(tabId, { tabType: "view", title: form.name || `Projekt #${projectId}` });
+        }, 1500);
+      } else {
+        setSuccess(true);
+        setTimeout(() => {
+          closeTab(tabId);
+          openTab({ moduleKey: "projects", title: "Projektek", color: "#06b6d4" });
+        }, 800);
+      }
     } else {
       setError(result.error ?? "Hiba történt");
     }
@@ -85,6 +98,17 @@ export function ProjectForm({ projectId, tabId, readOnly }: ProjectFormProps) {
 
   const handleEdit = () => {
     updateTab(tabId, { tabType: "edit", title: `Projekt szerkesztése #${projectId}` });
+  };
+
+  const handleCancel = () => {
+    if (projectId != null) {
+      setForm(originalFormData);
+      setError(null);
+      setSuccess(false);
+      updateTab(tabId, { tabType: "view", title: originalFormData.name || `Projekt #${projectId}` });
+    } else {
+      goBack();
+    }
   };
 
   const handleDelete = async () => {
@@ -199,7 +223,7 @@ export function ProjectForm({ projectId, tabId, readOnly }: ProjectFormProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={goBack}
+                  onClick={handleCancel}
                   className="px-4 py-2 rounded-[6px] text-sm border border-[var(--slate-200)] text-[var(--slate-600)] hover:bg-[var(--slate-50)] cursor-pointer transition-colors"
                 >
                   Mégse

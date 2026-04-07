@@ -57,7 +57,17 @@ export const useTabStore = create<TabStore>((set, get) => ({
       (t) => dedupKey(t.moduleKey, t.params) === key
     );
     if (existing) {
-      set({ activeTabId: existing.id });
+      const patch: Partial<ErpTab> = {};
+      if (tab.tabType && tab.tabType !== existing.tabType) patch.tabType = tab.tabType;
+      if (tab.title && tab.title !== existing.title) patch.title = tab.title;
+      if (Object.keys(patch).length > 0) {
+        set((s) => ({
+          tabs: s.tabs.map((t) => t.id === existing.id ? { ...t, ...patch } : t),
+          activeTabId: existing.id,
+        }));
+      } else {
+        set({ activeTabId: existing.id });
+      }
       return existing.id;
     }
     const id = newId();

@@ -12,6 +12,9 @@ import { BudgetForm } from "@/components/modules/budgets/BudgetForm";
 import { BudgetDetail } from "@/components/modules/budgets/BudgetDetail";
 import { AiAssistant } from "@/components/modules/ai-assistant/AiAssistant";
 import { ReportsDashboard } from "@/components/modules/reports/ReportsDashboard";
+import { ScenariosList } from "@/components/modules/scenarios/ScenariosList";
+import { ScenarioEditor } from "@/components/modules/scenarios/ScenarioEditor";
+import { ScenarioPreview } from "@/components/modules/scenarios/ScenarioPreview";
 import { FolderKanban } from "lucide-react";
 
 export function TabContent() {
@@ -92,6 +95,22 @@ export function TabContent() {
       );
     case "reports":
       return <ReportsDashboard />;
+    case "scenarios":
+      return <ScenariosList />;
+    case "scenarios-editor":
+      return (
+        <ScenarioEditor
+          scenarioId={resolveId("scenarioId")}
+          tabId={activeTab.id}
+        />
+      );
+    case "scenarios-preview":
+      return (
+        <ScenarioPreview
+          scenarioId={resolveId("scenarioId") as number}
+          tabId={activeTab.id}
+        />
+      );
     case "ai-assistant":
       return <AiAssistant />;
     default:

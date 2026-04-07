@@ -22,6 +22,8 @@ export function BudgetForm({ budgetId, tabId, readOnly }: BudgetFormProps) {
   const openTab = useTabStore((s) => s.openTab);
   const updateTab = useTabStore((s) => s.updateTab);
 
+  const [originalFormData, setOriginalFormData] = useState({ projectId: "", name: "" });
+
   const [form, setForm] = useState({
     projectId: "",
     name: "",
@@ -35,10 +37,12 @@ export function BudgetForm({ budgetId, tabId, readOnly }: BudgetFormProps) {
       if (budgetId) {
         const data = await getBudgetById(budgetId);
         if (data) {
-          setForm({
+          const loaded = {
             projectId: data.projectId.toString(),
             name: data.name,
-          });
+          };
+          setForm(loaded);
+          setOriginalFormData(loaded);
         }
       }
       setLoading(false);
@@ -58,11 +62,20 @@ export function BudgetForm({ budgetId, tabId, readOnly }: BudgetFormProps) {
 
     setSaving(false);
     if (result.success) {
-      setSuccess(true);
-      setTimeout(() => {
-        closeTab(tabId);
-        openTab({ moduleKey: "budgets", title: "Költségvetések", color: "#f59e0b" });
-      }, 500);
+      if (budgetId) {
+        setOriginalFormData(form);
+        setSuccess(true);
+        setTimeout(() => {
+          setSuccess(false);
+          updateTab(tabId, { tabType: "view", title: form.name || `Költségvetés #${budgetId}` });
+        }, 1500);
+      } else {
+        setSuccess(true);
+        setTimeout(() => {
+          closeTab(tabId);
+          openTab({ moduleKey: "budgets", title: "Költségvetések", color: "#f59e0b" });
+        }, 800);
+      }
     } else {
       setError(result.error ?? "Hiba történt");
     }
@@ -75,6 +88,17 @@ export function BudgetForm({ budgetId, tabId, readOnly }: BudgetFormProps) {
 
   const handleEdit = () => {
     updateTab(tabId, { tabType: "edit", title: `Költségvetés szerkesztése #${budgetId}` });
+  };
+
+  const handleCancel = () => {
+    if (budgetId != null) {
+      setForm(originalFormData);
+      setError(null);
+      setSuccess(false);
+      updateTab(tabId, { tabType: "view", title: originalFormData.name || `Költségvetés #${budgetId}` });
+    } else {
+      goBack();
+    }
   };
 
   const handleDeleteItem = async () => {
@@ -175,7 +199,7 @@ export function BudgetForm({ budgetId, tabId, readOnly }: BudgetFormProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={goBack}
+                  onClick={handleCancel}
                   className="px-4 py-2 rounded-[6px] text-sm border border-[var(--slate-200)] text-[var(--slate-600)] hover:bg-[var(--slate-50)] cursor-pointer transition-colors"
                 >
                   Mégse

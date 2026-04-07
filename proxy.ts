@@ -9,12 +9,15 @@ export async function proxy(request: NextRequest) {
 
   // Allow public paths through
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
-    // Redirect already-authenticated users away from login
-    const token = request.cookies.get("id_token")?.value;
-    if (token) {
-      const payload = await verifyJwt(token);
-      if (payload) {
-        return NextResponse.redirect(new URL("/", request.url));
+    // Redirect already-authenticated users away from login page (GET only)
+    // POST requests are internal Next.js RSC/flight fetches — never redirect those
+    if (request.method === "GET" && pathname === "/login") {
+      const token = request.cookies.get("id_token")?.value;
+      if (token) {
+        const payload = await verifyJwt(token);
+        if (payload) {
+          return NextResponse.redirect(new URL("/", request.url));
+        }
       }
     }
     return NextResponse.next();

@@ -22,6 +22,8 @@ export function QuoteForm({ quoteId, tabId, readOnly }: QuoteFormProps) {
   const openTab = useTabStore((s) => s.openTab);
   const updateTab = useTabStore((s) => s.updateTab);
 
+  const [originalFormData, setOriginalFormData] = useState({ projectId: "", subject: "", offererId: "", price: "0", currency: "HUF", status: "pending", validUntil: "", notes: "" });
+
   const [form, setForm] = useState({
     projectId: "",
     subject: "",
@@ -42,7 +44,7 @@ export function QuoteForm({ quoteId, tabId, readOnly }: QuoteFormProps) {
       if (quoteId) {
         const data = await getQuoteById(quoteId);
         if (data) {
-          setForm({
+          const loaded = {
             projectId: data.projectId.toString(),
             subject: data.subject,
             offererId: data.offererId?.toString() ?? "",
@@ -51,7 +53,9 @@ export function QuoteForm({ quoteId, tabId, readOnly }: QuoteFormProps) {
             status: data.status,
             validUntil: data.validUntil ?? "",
             notes: data.notes,
-          });
+          };
+          setForm(loaded);
+          setOriginalFormData(loaded);
         }
       }
       setLoading(false);
@@ -71,11 +75,20 @@ export function QuoteForm({ quoteId, tabId, readOnly }: QuoteFormProps) {
 
     setSaving(false);
     if (result.success) {
-      setSuccess(true);
-      setTimeout(() => {
-        closeTab(tabId);
-        openTab({ moduleKey: "quotes", title: "Ajánlatok", color: "#22c55e" });
-      }, 500);
+      if (quoteId) {
+        setOriginalFormData(form);
+        setSuccess(true);
+        setTimeout(() => {
+          setSuccess(false);
+          updateTab(tabId, { tabType: "view", title: form.subject || `Ajánlat #${quoteId}` });
+        }, 1500);
+      } else {
+        setSuccess(true);
+        setTimeout(() => {
+          closeTab(tabId);
+          openTab({ moduleKey: "quotes", title: "Ajánlatok", color: "#22c55e" });
+        }, 800);
+      }
     } else {
       setError(result.error ?? "Hiba történt");
     }
@@ -88,6 +101,17 @@ export function QuoteForm({ quoteId, tabId, readOnly }: QuoteFormProps) {
 
   const handleEdit = () => {
     updateTab(tabId, { tabType: "edit", title: `Ajánlat szerkesztése #${quoteId}` });
+  };
+
+  const handleCancel = () => {
+    if (quoteId != null) {
+      setForm(originalFormData);
+      setError(null);
+      setSuccess(false);
+      updateTab(tabId, { tabType: "view", title: originalFormData.subject || `Ajánlat #${quoteId}` });
+    } else {
+      goBack();
+    }
   };
 
   const handleDeleteItem = async () => {
@@ -247,7 +271,7 @@ export function QuoteForm({ quoteId, tabId, readOnly }: QuoteFormProps) {
                 </button>
                 <button
                   type="button"
-                  onClick={goBack}
+                  onClick={handleCancel}
                   className="px-4 py-2 rounded-[6px] text-sm border border-[var(--slate-200)] text-[var(--slate-600)] hover:bg-[var(--slate-50)] cursor-pointer transition-colors"
                 >
                   Mégse
