@@ -38,6 +38,8 @@ export const partners = pgTable(
 export const partnersRelations = relations(partners, ({ many }) => ({
   clientProjects: many(projects),
   offeredQuotes: many(quotes),
+  accessTokens: many(subcontractorAccessTokens),
+  billings: many(subcontractorBillings),
 }));
 
 // ============================================================
@@ -323,3 +325,82 @@ export const costScenarioLayersRelations = relations(costScenarioLayers, ({ one 
     references: [versions.id],
   }),
 }));
+
+// ============================================================
+// 10. SUBCONTRACTOR BILLINGS (Alvállalkozói számlák)
+// ============================================================
+export const subcontractorBillings = pgTable(
+  "subcontractor_billings",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    partnerId: bigint("partner_id", { mode: "number" })
+      .notNull()
+      .references(() => partners.id, { onDelete: "cascade" }),
+    versionId: bigint("version_id", { mode: "number" })
+      .notNull()
+      .references(() => versions.id, { onDelete: "cascade" }),
+    billingNumber: text("billing_number").generatedAlwaysAs(
+      sql`'SZLA-' || LPAD(id::TEXT, 4, '0')`
+    ),
+    amount: numeric("amount", { precision: 15, scale: 2 }).notNull().default("0"),
+    description: text("description").notNull().default(""),
+    status: text("status").notNull().default("draft"),
+    periodStart: date("period_start"),
+    periodEnd: date("period_end"),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewerNotes: text("reviewer_notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index("idx_sub_billings_partner_id").on(t.partnerId),
+    index("idx_sub_billings_version_id").on(t.versionId),
+    index("idx_sub_billings_status").on(t.status),
+    check("sub_billings_status_check", sql`${t.status} IN ('draft', 'submitted', 'approved', 'rejected')`),
+  ]
+);
+
+export const subcontractorBillingsRelations = relations(subcontractorBillings, ({ one }) => ({
+  partner: one(partners, {
+    fields: [subcontractorBillings.partnerId],
+    references: [partners.id],
+  }),
+  version: one(versions, {
+    fields: [subcontractorBillings.versionId],
+    references: [versions.id],
+  }),
+}));
+
+// ============================================================
+// 11. SUBCONTRACTOR ACCESS TOKENS (Alvállalkozói hozzáférési tokenek)
+// ============================================================
+export const subcontractorAccessTokens = pgTable(
+  "subcontractor_access_tokens",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    partnerId: bigint("partner_id", { mode: "number" })
+      .notNull()
+      .references(() => partners.id, { onDelete: "cascade" }),
+    token: text("token").notNull().unique(),
+    label: text("label").notNull().default(""),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    usedAt: timestamp("used_at", { withTimezone: true }),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdBy: text("created_by").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index("idx_sub_tokens_partner_id").on(t.partnerId),
+    index("idx_sub_tokens_token").on(t.token),
+  ]
+);
+
+export const subcontractorAccessTokensRelations = relations(
+  subcontractorAccessTokens,
+  ({ one }) => ({
+    partner: one(partners, {
+      fields: [subcontractorAccessTokens.partnerId],
+      references: [partners.id],
+    }),
+  })
+);

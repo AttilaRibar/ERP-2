@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 import { Save, ArrowLeft, Pencil, Trash2 } from "lucide-react";
 import { getPartnerById, createPartner, updatePartner, deletePartner } from "@/server/actions/partners";
 import { useTabStore } from "@/stores/tab-store";
+import { TokenManager } from "@/components/modules/admin-billing/TokenManager";
 
 interface PartnerFormProps {
   partnerId?: number;
@@ -204,6 +205,11 @@ export function PartnerForm({ partnerId, tabId, readOnly }: PartnerFormProps) {
             )}
           </div>
         </form>
+
+        {/* Token management for subcontractors */}
+        {form.partnerType === "subcontractor" && partnerId && (
+          <TokenManager partnerId={partnerId} />
+        )}
       </div>
     </div>
   );

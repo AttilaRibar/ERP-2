@@ -15,6 +15,7 @@ import { ReportsDashboard } from "@/components/modules/reports/ReportsDashboard"
 import { ScenariosList } from "@/components/modules/scenarios/ScenariosList";
 import { ScenarioEditor } from "@/components/modules/scenarios/ScenarioEditor";
 import { ScenarioPreview } from "@/components/modules/scenarios/ScenarioPreview";
+import { AdminBillingPanel } from "@/components/modules/admin-billing/AdminBillingPanel";
 import { FolderKanban } from "lucide-react";
 
 export function TabContent() {
@@ -95,6 +96,8 @@ export function TabContent() {
       );
     case "reports":
       return <ReportsDashboard />;
+    case "admin-billing":
+      return <AdminBillingPanel />;
     case "scenarios":
       return <ScenariosList />;
     case "scenarios-editor":
