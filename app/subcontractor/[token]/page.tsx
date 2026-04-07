@@ -30,7 +30,6 @@ export default async function SubcontractorPage({ params }: PageProps) {
   return (
     <SubcontractorPortal
       token={token}
-      partnerId={resolved.partnerId}
     />
   );
 }

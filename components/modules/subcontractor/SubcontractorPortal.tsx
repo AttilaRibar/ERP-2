@@ -281,9 +281,6 @@ function BillingRow({ billing, token, onUpdated }: BillingRowProps) {
 
 interface SubcontractorPortalProps {
   token: string;
-  /** partnerId is provided by the server-validated page; reserved for future deep-linking use. */
-  // eslint-disable-next-line react/no-unused-prop-types
-  partnerId: number;
 }
 
 export function SubcontractorPortal({ token }: SubcontractorPortalProps) {
