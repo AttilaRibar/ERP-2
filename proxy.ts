@@ -1,8 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { verifyJwt } from "@/lib/auth/session";
+import { verifySettleSession } from "@/lib/auth/settle-session";
 
 /** Paths that don't require authentication */
-const PUBLIC_PATHS = ["/login", "/api/auth/"];
+const PUBLIC_PATHS = ["/login", "/api/auth/", "/api/settle/auth"];
+
+/** Subcontractor portal paths — use settle_session JWT (not Cognito) */
+const SETTLE_PATH_PREFIX = "/settle";
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
@@ -10,7 +14,6 @@ export async function proxy(request: NextRequest) {
   // Allow public paths through
   if (PUBLIC_PATHS.some((p) => pathname.startsWith(p))) {
     // Redirect already-authenticated users away from login page (GET only)
-    // POST requests are internal Next.js RSC/flight fetches — never redirect those
     if (request.method === "GET" && pathname === "/login") {
       const token = request.cookies.get("id_token")?.value;
       if (token) {
@@ -21,6 +24,40 @@ export async function proxy(request: NextRequest) {
       }
     }
     return NextResponse.next();
+  }
+
+  // ── Subcontractor settle portal ──
+  if (pathname.startsWith(SETTLE_PATH_PREFIX)) {
+    // The /settle/[token] login page is public (no session needed)
+    // But /settle/[token]/dashboard and /settle/[token]/invoice/* require session
+    const segments = pathname.split("/").filter(Boolean); // ["settle", token, ...]
+    if (segments.length <= 2) {
+      // /settle/[token] — login page, public
+      return NextResponse.next();
+    }
+
+    // Deeper paths require settle_session cookie
+    const jwt = request.cookies.get("settle_session")?.value;
+    if (!jwt) {
+      // Redirect to the token login page
+      const tokenSegment = segments[1];
+      return NextResponse.redirect(new URL(`/settle/${tokenSegment}`, request.url));
+    }
+
+    const payload = await verifySettleSession(jwt);
+    if (!payload) {
+      const tokenSegment = segments[1];
+      const response = NextResponse.redirect(new URL(`/settle/${tokenSegment}`, request.url));
+      response.cookies.delete("settle_session");
+      return response;
+    }
+
+    // Forward settle context via headers (for server components)
+    const requestHeaders = new Headers(request.headers);
+    requestHeaders.set("x-settle-contract-id", String(payload.contractId));
+    requestHeaders.set("x-settle-partner-id", String(payload.partnerId));
+
+    return NextResponse.next({ request: { headers: requestHeaders } });
   }
 
   // Validate the id_token cookie

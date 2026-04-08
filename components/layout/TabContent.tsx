@@ -15,7 +15,10 @@ import { ReportsDashboard } from "@/components/modules/reports/ReportsDashboard"
 import { ScenariosList } from "@/components/modules/scenarios/ScenariosList";
 import { ScenarioEditor } from "@/components/modules/scenarios/ScenarioEditor";
 import { ScenarioPreview } from "@/components/modules/scenarios/ScenarioPreview";
-import { AdminBillingPanel } from "@/components/modules/admin-billing/AdminBillingPanel";
+import { SettlementsList } from "@/components/modules/settlements/SettlementsList";
+import { SettlementSetup } from "@/components/modules/settlements/SettlementSetup";
+import { SettlementManager } from "@/components/modules/settlements/SettlementManager";
+import { SettlementReview } from "@/components/modules/settlements/SettlementReview";
 import { FolderKanban } from "lucide-react";
 
 export function TabContent() {
@@ -96,8 +99,24 @@ export function TabContent() {
       );
     case "reports":
       return <ReportsDashboard />;
-    case "admin-billing":
-      return <AdminBillingPanel />;
+    case "settlements":
+      return <SettlementsList />;
+    case "settlements-setup":
+      return <SettlementSetup />;
+    case "settlements-manage":
+      return (
+        <SettlementManager
+          contractId={resolveId("contractId") as number}
+          tabId={activeTab.id}
+        />
+      );
+    case "settlements-review":
+      return (
+        <SettlementReview
+          contractId={resolveId("contractId") as number}
+          invoiceId={resolveId("invoiceId") as number}
+        />
+      );
     case "scenarios":
       return <ScenariosList />;
     case "scenarios-editor":

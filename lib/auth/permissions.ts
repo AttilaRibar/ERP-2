@@ -9,8 +9,8 @@ export type CognitoGroup =
 /** Maps Cognito groups to allowed permission strings. */
 export const PERMISSIONS: Record<CognitoGroup, string[]> = {
   "erp-admin": ["*"],
-  "erp-manager": ["orders:*", "inventory:*", "hr:read", "projects:*"],
-  "erp-accountant": ["finance:*", "orders:read", "inventory:read"],
+  "erp-manager": ["orders:*", "inventory:*", "hr:read", "projects:*", "settlements:*"],
+  "erp-accountant": ["finance:*", "orders:read", "inventory:read", "settlements:read"],
   "erp-viewer": ["orders:read", "inventory:read", "finance:read"],
 };
 
@@ -34,7 +34,12 @@ export async function getGroupsFromHeaders(): Promise<CognitoGroup[]> {
   const raw = headerStore.get("x-user-groups");
   if (!raw) return [];
   try {
-    return JSON.parse(raw) as CognitoGroup[];
+    const groups = JSON.parse(raw) as CognitoGroup[];
+    // In development, grant admin if user has no Cognito groups assigned
+    if (groups.length === 0 && process.env.NODE_ENV === "development") {
+      return ["erp-admin"];
+    }
+    return groups;
   } catch {
     return [];
   }

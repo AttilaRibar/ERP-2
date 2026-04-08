@@ -38,8 +38,7 @@ export const partners = pgTable(
 export const partnersRelations = relations(partners, ({ many }) => ({
   clientProjects: many(projects),
   offeredQuotes: many(quotes),
-  accessTokens: many(subcontractorAccessTokens),
-  billings: many(subcontractorBillings),
+  settlementContracts: many(settlementContracts),
 }));
 
 // ============================================================
@@ -327,80 +326,122 @@ export const costScenarioLayersRelations = relations(costScenarioLayers, ({ one 
 }));
 
 // ============================================================
-// 10. SUBCONTRACTOR BILLINGS (Alvállalkozói számlák)
+// 10. SETTLEMENT CONTRACTS (Elszámolási szerződések)
 // ============================================================
-export const subcontractorBillings = pgTable(
-  "subcontractor_billings",
+export const settlementContracts = pgTable(
+  "settlement_contracts",
   {
     id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-    partnerId: bigint("partner_id", { mode: "number" })
+    budgetId: bigint("budget_id", { mode: "number" })
       .notNull()
-      .references(() => partners.id, { onDelete: "cascade" }),
+      .references(() => budgets.id, { onDelete: "cascade" }),
     versionId: bigint("version_id", { mode: "number" })
       .notNull()
       .references(() => versions.id, { onDelete: "cascade" }),
-    billingNumber: text("billing_number").generatedAlwaysAs(
-      sql`'SZLA-' || LPAD(id::TEXT, 4, '0')`
-    ),
-    amount: numeric("amount", { precision: 15, scale: 2 }).notNull().default("0"),
-    description: text("description").notNull().default(""),
-    status: text("status").notNull().default("draft"),
-    periodStart: date("period_start"),
-    periodEnd: date("period_end"),
-    submittedAt: timestamp("submitted_at", { withTimezone: true }),
-    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
-    reviewerNotes: text("reviewer_notes"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
-  },
-  (t) => [
-    index("idx_sub_billings_partner_id").on(t.partnerId),
-    index("idx_sub_billings_version_id").on(t.versionId),
-    index("idx_sub_billings_status").on(t.status),
-    check("sub_billings_status_check", sql`${t.status} IN ('draft', 'submitted', 'approved', 'rejected')`),
-  ]
-);
-
-export const subcontractorBillingsRelations = relations(subcontractorBillings, ({ one }) => ({
-  partner: one(partners, {
-    fields: [subcontractorBillings.partnerId],
-    references: [partners.id],
-  }),
-  version: one(versions, {
-    fields: [subcontractorBillings.versionId],
-    references: [versions.id],
-  }),
-}));
-
-// ============================================================
-// 11. SUBCONTRACTOR ACCESS TOKENS (Alvállalkozói hozzáférési tokenek)
-// ============================================================
-export const subcontractorAccessTokens = pgTable(
-  "subcontractor_access_tokens",
-  {
-    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
     partnerId: bigint("partner_id", { mode: "number" })
       .notNull()
       .references(() => partners.id, { onDelete: "cascade" }),
-    token: text("token").notNull().unique(),
+    accessToken: text("access_token").notNull().unique(),
+    passwordHash: text("password_hash").notNull(),
+    totalNetAmount: numeric("total_net_amount", { precision: 15, scale: 2 }).notNull().default("0"),
     label: text("label").notNull().default(""),
-    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
-    usedAt: timestamp("used_at", { withTimezone: true }),
-    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    status: text("status").notNull().default("active"),
     createdBy: text("created_by").notNull().default(""),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
   },
   (t) => [
-    index("idx_sub_tokens_partner_id").on(t.partnerId),
-    index("idx_sub_tokens_token").on(t.token),
+    index("idx_settlement_contracts_budget").on(t.budgetId),
+    index("idx_settlement_contracts_version").on(t.versionId),
+    index("idx_settlement_contracts_partner").on(t.partnerId),
+    index("idx_settlement_contracts_status").on(t.status),
+    check("settlement_contracts_status_check", sql`${t.status} IN ('active', 'completed', 'cancelled')`),
   ]
 );
 
-export const subcontractorAccessTokensRelations = relations(
-  subcontractorAccessTokens,
-  ({ one }) => ({
-    partner: one(partners, {
-      fields: [subcontractorAccessTokens.partnerId],
-      references: [partners.id],
-    }),
-  })
+export const settlementContractsRelations = relations(settlementContracts, ({ one, many }) => ({
+  budget: one(budgets, {
+    fields: [settlementContracts.budgetId],
+    references: [budgets.id],
+  }),
+  version: one(versions, {
+    fields: [settlementContracts.versionId],
+    references: [versions.id],
+  }),
+  partner: one(partners, {
+    fields: [settlementContracts.partnerId],
+    references: [partners.id],
+  }),
+  invoices: many(settlementInvoices),
+}));
+
+// ============================================================
+// 11. SETTLEMENT INVOICES (Részszámlák)
+// ============================================================
+export const settlementInvoices = pgTable(
+  "settlement_invoices",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    contractId: bigint("contract_id", { mode: "number" })
+      .notNull()
+      .references(() => settlementContracts.id, { onDelete: "cascade" }),
+    invoiceNumber: integer("invoice_number").notNull(),
+    label: text("label").notNull().default(""),
+    maxAmount: numeric("max_amount", { precision: 15, scale: 2 }).notNull().default("0"),
+    status: text("status").notNull().default("locked"),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+    submittedNote: text("submitted_note"),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    reviewedBy: text("reviewed_by"),
+    reviewNote: text("review_note"),
+    claimedMaterialTotal: numeric("claimed_material_total", { precision: 15, scale: 2 }).notNull().default("0"),
+    claimedFeeTotal: numeric("claimed_fee_total", { precision: 15, scale: 2 }).notNull().default("0"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index("idx_settlement_invoices_contract").on(t.contractId),
+    index("idx_settlement_invoices_status").on(t.status),
+    uniqueIndex("uq_settlement_invoices_number").on(t.contractId, t.invoiceNumber),
+    check("settlement_invoices_status_check", sql`${t.status} IN ('locked', 'open', 'submitted', 'approved', 'rejected')`),
+  ]
 );
+
+export const settlementInvoicesRelations = relations(settlementInvoices, ({ one, many }) => ({
+  contract: one(settlementContracts, {
+    fields: [settlementInvoices.contractId],
+    references: [settlementContracts.id],
+  }),
+  items: many(settlementItems),
+}));
+
+// ============================================================
+// 12. SETTLEMENT ITEMS (Tételes elszámolás)
+// ============================================================
+export const settlementItems = pgTable(
+  "settlement_items",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    invoiceId: bigint("invoice_id", { mode: "number" })
+      .notNull()
+      .references(() => settlementInvoices.id, { onDelete: "cascade" }),
+    itemCode: uuid("item_code").notNull(),
+    claimedMaterialAmount: numeric("claimed_material_amount", { precision: 15, scale: 2 }).notNull().default("0"),
+    claimedFeeAmount: numeric("claimed_fee_amount", { precision: 15, scale: 2 }).notNull().default("0"),
+    note: text("note").notNull().default(""),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index("idx_settlement_items_invoice").on(t.invoiceId),
+    index("idx_settlement_items_item_code").on(t.itemCode),
+    uniqueIndex("uq_settlement_items_invoice_item").on(t.invoiceId, t.itemCode),
+  ]
+);
+
+export const settlementItemsRelations = relations(settlementItems, ({ one }) => ({
+  invoice: one(settlementInvoices, {
+    fields: [settlementItems.invoiceId],
+    references: [settlementInvoices.id],
+  }),
+}));

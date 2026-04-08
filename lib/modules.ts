@@ -7,7 +7,7 @@ import {
   Bot,
   BarChart2,
   Layers,
-  Receipt,
+  ClipboardList,
 } from "lucide-react";
 import type { ModuleDef } from "@/types/modules";
 
@@ -17,7 +17,7 @@ export const MODULE_REGISTRY: ModuleDef[] = [
   { key: "quotes", label: "Ajánlatok", icon: FileText, color: "#22c55e" },
   { key: "budgets", label: "Költségvetések", icon: Calculator, color: "#f59e0b" },
   { key: "scenarios", label: "Szcenáriók", icon: Layers, color: "#ec4899" },
-  { key: "admin-billing", label: "Alvállalkozói számlák", icon: Receipt, color: "#0ea5e9" },
+  { key: "settlements", label: "Alvállalkozói elszámolás", icon: ClipboardList, color: "#0ea5e9" },
   { key: "reports", label: "Kimutatások", icon: BarChart2, color: "#6366f1", dropdownItems: [
     { key: "reports-general", label: "Általános kimutatás", moduleKey: "reports" },
     { key: "reports-finance", label: "Pénzügyi kimutatás", moduleKey: "reports", params: { report: "finance" } },
