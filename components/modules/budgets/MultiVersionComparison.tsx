@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
-import { ArrowLeft, Trophy, ChevronDown, ChevronRight, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff } from "lucide-react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
+import { ArrowLeft, Trophy, ChevronDown, ChevronRight, ChevronUp, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff, X } from "lucide-react";
 import {
   compareMultipleVersions,
   type MultiComparisonResult,
@@ -53,8 +54,8 @@ function findCheapestIdx(values: number[], skipZero = false): number {
 
 // ---- Overview Cards ----
 
-function OverviewView({ result, skipZero }: { result: MultiComparisonResult; skipZero: boolean }) {
-  const versions = result.versions;
+function OverviewView({ result, skipZero, hiddenVersionIdxs }: { result: MultiComparisonResult; skipZero: boolean; hiddenVersionIdxs: Set<number> }) {
+  const versions = result.versions.filter((_, i) => !hiddenVersionIdxs.has(i));
   const cheapestCombinedIdx = findCheapestIdx(versions.map((v) => v.totalCombined), skipZero);
   const cheapestMaterialIdx = findCheapestIdx(versions.map((v) => v.totalMaterial), skipZero);
   const cheapestFeeIdx = findCheapestIdx(versions.map((v) => v.totalFee), skipZero);
@@ -388,8 +389,8 @@ function SectionRow({
   );
 }
 
-function SectionsView({ result, skipZero }: { result: MultiComparisonResult; skipZero: boolean }) {
-  const versions = result.versions;
+function SectionsView({ result, skipZero, hiddenVersionIdxs }: { result: MultiComparisonResult; skipZero: boolean; hiddenVersionIdxs: Set<number> }) {
+  const versions = result.versions.filter((_, i) => !hiddenVersionIdxs.has(i));
   const unifiedTree = useMemo(() => buildUnifiedSectionTree(versions), [versions]);
 
   // When skipZero, filter out sections where ALL versions have 0 total
@@ -482,9 +483,230 @@ function SectionsView({ result, skipZero }: { result: MultiComparisonResult; ski
   );
 }
 
+// ---- Item Detail Tooltip ----
+
+interface ItemTooltipState {
+  variance: ItemVariance;
+  x: number;
+  y: number;
+}
+
+function ItemDetailTooltip({
+  state,
+  versions,
+  hiddenVersionIdxs,
+  skipZero,
+  onEnter,
+  onLeave,
+}: {
+  state: ItemTooltipState;
+  versions: MultiVersionEntry[];
+  hiddenVersionIdxs: Set<number>;
+  skipZero: boolean;
+  onEnter: () => void;
+  onLeave: () => void;
+}) {
+  const { variance: v } = state;
+
+  const entries = v.item.perVersion
+    .map((pv, idx) => ({ pv, idx, version: versions[idx] }))
+    .filter(({ pv, idx }) => !hiddenVersionIdxs.has(idx) && pv !== null && (!skipZero || pv.combinedUnitPrice !== 0));
+
+  if (entries.length === 0) return null;
+
+  const combinedTotals = entries.map((e) => e.pv!.combinedTotal);
+  const combinedUnits = entries.map((e) => e.pv!.combinedUnitPrice);
+  const minTotal = Math.min(...combinedTotals);
+  const maxTotal = Math.max(...combinedTotals);
+  const minUnit = Math.min(...combinedUnits);
+  const maxUnit = Math.max(...combinedUnits);
+  const hasVariance = entries.length > 1;
+
+  const diffUnit = maxUnit - minUnit;
+  const avgUnit = combinedUnits.reduce((s, v) => s + v, 0) / combinedUnits.length;
+  const diffUnitPct = avgUnit > 0 ? (diffUnit / avgUnit) * 100 : 0;
+  const diffTotal = maxTotal - minTotal;
+  const avgTotal = combinedTotals.reduce((s, v) => s + v, 0) / combinedTotals.length;
+  const diffTotalPct = avgTotal > 0 ? (diffTotal / avgTotal) * 100 : 0;
+
+  // Clamp position within viewport — let width grow with content, cap at viewport
+  const vpW = typeof window !== "undefined" ? window.innerWidth : 1200;
+  const vpH = typeof window !== "undefined" ? window.innerHeight : 800;
+  const maxW = vpW - 24;
+  const x = Math.max(8, Math.min(state.x, vpW - 400));
+  const y = state.y + 240 > vpH ? Math.max(8, state.y - 300) : state.y;
+
+  return (
+    <div
+      className="fixed z-[200] bg-white rounded-xl shadow-2xl border border-[var(--slate-200)] overflow-hidden text-xs"
+      style={{ left: x, top: y, maxWidth: maxW, width: "max-content", maxHeight: "70vh", overflowY: "auto" }}
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+    >
+      {/* Header */}
+      <div className="bg-[var(--slate-700)] text-white px-4 py-2.5 sticky top-0 z-10">
+        <div className="font-bold text-[13px] leading-snug whitespace-normal break-words max-w-[600px]">{v.item.name}</div>
+        <div className="text-[10px] text-[var(--slate-300)] mt-0.5 flex items-center gap-2">
+          {v.item.itemNumber && <span className="font-mono">#{v.item.itemNumber}</span>}
+          {v.item.sectionName && <span>{v.item.sectionName}</span>}
+          <span className="text-[var(--slate-400)]">·</span>
+          <span>{entries.length} ajánlat összehasonlítva</span>
+        </div>
+      </div>
+
+      {/* Table */}
+      <table className="border-collapse" style={{ width: "max-content" }}>
+        <colgroup>
+          <col />{/* Alvállalkozó */}
+          <col />{/* Menny. */}
+          <col />{/* Anyag e.ár */}
+          <col />{/* Díj e.ár */}
+          <col />{/* A+D e.ár */}
+          <col style={{ width: "56px" }} />{/* % eltérés e.ár */}
+          <col style={{ width: "8px" }} />{/* spacer */}
+          <col />{/* Anyag sum. */}
+          <col />{/* Díj sum. */}
+          <col />{/* A+D sum. */}
+          <col style={{ width: "56px" }} />{/* % eltérés sum. */}
+        </colgroup>
+        <thead>
+          <tr className="bg-[var(--slate-50)] border-b border-[var(--slate-200)]">
+            <th className="text-left px-3 py-1.5 text-[var(--slate-500)] font-medium">Alvállalkozó</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Menny.</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Anyag e.ár</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Díj e.ár</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">A+D e.ár</th>
+            <th className="px-1 py-1.5" />{/* % e.ár */}
+            <th className="px-0 py-1.5 bg-[var(--slate-200)]" />{/* spacer */}
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Anyag sum.</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Díj sum.</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">A+D sum.</th>
+            <th className="px-1 py-1.5" />{/* % sum. */}
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(({ pv, idx, version }) => {
+            const isMinTotal = hasVariance && pv!.combinedTotal === minTotal;
+            const isMaxTotal = hasVariance && pv!.combinedTotal === maxTotal;
+            const isMinUnit = hasVariance && pv!.combinedUnitPrice === minUnit;
+            const isMaxUnit = hasVariance && pv!.combinedUnitPrice === maxUnit;
+            const color = getColor(idx);
+            const deviationFromMin = minUnit > 0 ? ((pv!.combinedUnitPrice - minUnit) / minUnit) * 100 : 0;
+            const totalDeviationFromMin = minTotal > 0 ? ((pv!.combinedTotal - minTotal) / minTotal) * 100 : 0;
+            return (
+              <tr
+                key={idx}
+                className={`border-b border-[var(--slate-100)] ${
+                  isMinTotal ? "bg-green-50" : isMaxTotal ? "bg-red-50/40" : ""
+                }`}
+              >
+                {/* Alvállalkozó */}
+                <td className="px-3 py-1.5 font-medium">
+                  <div className={`flex items-center gap-1.5 ${color.text}`}>
+                    {isMinTotal && hasVariance && (
+                      <span className="shrink-0 text-green-600 text-[12px] leading-none">▼</span>
+                    )}
+                    {isMaxTotal && hasVariance && (
+                      <span className="shrink-0 text-red-600 text-[12px] leading-none">▲</span>
+                    )}
+                    {!isMinTotal && !isMaxTotal && hasVariance && (
+                      <span className="shrink-0 w-[12px]" />
+                    )}
+                    <span className="truncate max-w-[140px]" title={version.partnerName ?? version.versionName}>
+                      {version.partnerName ?? version.versionName}
+                    </span>
+                  </div>
+                </td>
+                {/* Menny. */}
+                <td className="px-3 py-1.5 text-right text-[var(--slate-600)] whitespace-nowrap">
+                  {fmtDetailed(pv!.quantity)} {v.item.unit}
+                </td>
+                {/* Anyag e.ár */}
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmtDetailed(pv!.materialUnitPrice)}
+                </td>
+                {/* Díj e.ár */}
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmtDetailed(pv!.feeUnitPrice)}
+                </td>
+                {/* A+D e.ár */}
+                <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                  <span className={`font-semibold ${isMinUnit ? "text-green-700" : isMaxUnit ? "text-red-700" : "text-[var(--slate-800)]"}`}>
+                    {fmtDetailed(pv!.combinedUnitPrice)}
+                    {isMinUnit && hasVariance && <span className="ml-0.5 text-[9px] text-green-600">▼</span>}
+                    {isMaxUnit && hasVariance && <span className="ml-0.5 text-[9px] text-red-600">▲</span>}
+                  </span>
+                </td>
+                {/* % eltérés e.ár */}
+                <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                  {!isMinUnit && hasVariance && deviationFromMin > 0 ? (
+                    <span className="text-[10px] text-[var(--slate-400)]">(+{deviationFromMin.toFixed(1)}%)</span>
+                  ) : <span />}
+                </td>
+                {/* spacer */}
+                <td className="p-0 bg-[var(--slate-100)]" />
+                {/* Anyag sum. */}
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmt(pv!.materialTotal)}
+                </td>
+                {/* Díj sum. */}
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmt(pv!.feeTotal)}
+                </td>
+                {/* A+D sum. */}
+                <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                  <span className={`font-semibold ${isMinTotal ? "text-green-700" : isMaxTotal ? "text-red-700" : "text-[var(--slate-800)]"}`}>
+                    {fmt(pv!.combinedTotal)}
+                    {isMinTotal && hasVariance && <span className="ml-0.5 text-[9px] text-green-600">▼</span>}
+                    {isMaxTotal && hasVariance && <span className="ml-0.5 text-[9px] text-red-600">▲</span>}
+                  </span>
+                </td>
+                {/* % eltérés sum. */}
+                <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                  {!isMinTotal && hasVariance && totalDeviationFromMin > 0 ? (
+                    <span className="text-[10px] text-[var(--slate-400)]">(+{totalDeviationFromMin.toFixed(1)}%)</span>
+                  ) : <span />}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+        {hasVariance && (
+          <tfoot>
+            <tr className="bg-[var(--slate-100)] border-t-2 border-[var(--slate-300)]">
+              <td colSpan={4} className="px-3 py-1.5 text-[var(--slate-500)] font-semibold whitespace-nowrap">
+                Eltérés (max − min)
+              </td>
+              {/* A+D e.ár eltérés */}
+              <td className="px-3 py-1.5 text-right font-bold text-red-700 whitespace-nowrap">
+                +{fmtDetailed(diffUnit)}
+              </td>
+              <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                <span className="text-[10px] font-normal text-red-500">({diffUnitPct.toFixed(1)}%)</span>
+              </td>
+              {/* spacer */}
+              <td className="p-0 bg-[var(--slate-200)]" />
+              {/* Anyag / Díj sum. — nincs */}
+              <td className="px-3 py-1.5 text-right text-[var(--slate-400)]">—</td>
+              <td className="px-3 py-1.5 text-right text-[var(--slate-400)]">—</td>
+              {/* A+D sum. eltérés */}
+              <td className="px-3 py-1.5 text-right font-bold text-red-700 whitespace-nowrap">
+                +{fmt(diffTotal)}
+              </td>
+              <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                <span className="text-[10px] font-normal text-red-500">({diffTotalPct.toFixed(1)}%)</span>
+              </td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
+
 // ---- Variance Analysis View (price outlier detection) ----
 
-type VarianceMode = "percentage" | "absolute";
+type VarianceMode = "percentage" | "absolute" | "total";
 type PriceField = "combined" | "material" | "fee";
 
 interface ItemVariance {
@@ -499,7 +721,7 @@ interface ItemVariance {
   stdCombined: number;
   stdMaterial: number;
   stdFee: number;
-  /** Max - Min spread */
+  /** Max - Min spread (unit prices) */
   spreadCombined: number;
   spreadMaterial: number;
   spreadFee: number;
@@ -507,9 +729,15 @@ interface ItemVariance {
   spreadPctCombined: number;
   spreadPctMaterial: number;
   spreadPctFee: number;
+  /** Volume-weighted total spread: max(qty×price) - min(qty×price) */
+  spreadCombinedTotal: number;
+  spreadMaterialTotal: number;
+  spreadFeeTotal: number;
   /** Min/max indices */
   minCombinedIdx: number;
   maxCombinedIdx: number;
+  minCombinedTotalIdx: number;
+  maxCombinedTotalIdx: number;
 }
 
 function computeVariances(items: MultiVersionItemEntry[], skipZero = false): ItemVariance[] {
@@ -539,6 +767,15 @@ function computeVariances(items: MultiVersionItemEntry[], skipZero = false): Ite
       const minCIdx = prices[combinedVals.indexOf(minC)].idx;
       const maxCIdx = prices[combinedVals.indexOf(maxC)].idx;
 
+      const combinedTotalVals = prices.map((p) => p.combinedTotal);
+      const materialTotalVals = prices.map((p) => p.materialTotal);
+      const feeTotalVals = prices.map((p) => p.feeTotal);
+
+      const minCT = Math.min(...combinedTotalVals);
+      const maxCT = Math.max(...combinedTotalVals);
+      const minCTIdx = prices[combinedTotalVals.indexOf(minCT)].idx;
+      const maxCTIdx = prices[combinedTotalVals.indexOf(maxCT)].idx;
+
       return {
         item,
         presentCount: prices.length,
@@ -554,8 +791,13 @@ function computeVariances(items: MultiVersionItemEntry[], skipZero = false): Ite
         spreadPctCombined: avgC > 0 ? ((maxC - minC) / avgC) * 100 : 0,
         spreadPctMaterial: avgM > 0 ? ((Math.max(...materialVals) - Math.min(...materialVals)) / avgM) * 100 : 0,
         spreadPctFee: avgF > 0 ? ((Math.max(...feeVals) - Math.min(...feeVals)) / avgF) * 100 : 0,
+        spreadCombinedTotal: maxCT - minCT,
+        spreadMaterialTotal: Math.max(...materialTotalVals) - Math.min(...materialTotalVals),
+        spreadFeeTotal: Math.max(...feeTotalVals) - Math.min(...feeTotalVals),
         minCombinedIdx: minCIdx,
         maxCombinedIdx: maxCIdx,
+        minCombinedTotalIdx: minCTIdx,
+        maxCombinedTotalIdx: maxCTIdx,
       } satisfies ItemVariance;
     })
     .filter((x): x is ItemVariance => x !== null);
@@ -568,22 +810,145 @@ function getSeverity(pct: number): { label: string; cls: string; bg: string } {
   return { label: "Alacsony", cls: "text-[var(--slate-500)]", bg: "bg-[var(--slate-100)]" };
 }
 
-function VarianceView({ result, skipZero }: { result: MultiComparisonResult; skipZero: boolean }) {
+function VarianceView({
+  result,
+  skipZero,
+  hiddenVersionIdxs,
+}: {
+  result: MultiComparisonResult;
+  skipZero: boolean;
+  hiddenVersionIdxs: Set<number>;
+}) {
   const [mode, setMode] = useState<VarianceMode>("percentage");
   const [priceField, setPriceField] = useState<PriceField>("combined");
   const [minSpreadPct, setMinSpreadPct] = useState(10);
+  const [minSpreadTotal, setMinSpreadTotal] = useState(0);
   const [showAll, setShowAll] = useState(false);
+  // Sort by a specific version column: null = sort by spread (default)
+  const [sortByVersion, setSortByVersion] = useState<{ idx: number; dir: "asc" | "desc" } | null>(null);
+  // Tooltip state
+  const [tooltip, setTooltip] = useState<ItemTooltipState | null>(null);
+  const tooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reset sort when the sorted column becomes hidden
+  useEffect(() => {
+    if (sortByVersion && hiddenVersionIdxs.has(sortByVersion.idx)) {
+      setSortByVersion(null);
+    }
+  }, [hiddenVersionIdxs, sortByVersion]);
+
+  const handleVersionHeaderClick = useCallback((idx: number) => {
+    setSortByVersion((prev) => {
+      if (!prev || prev.idx !== idx) return { idx, dir: "asc" };
+      if (prev.dir === "asc") return { idx, dir: "desc" };
+      return null; // third click → back to spread sort
+    });
+  }, []);
+
+  const handleItemNameEnter = useCallback(
+    (e: React.MouseEvent<HTMLTableCellElement>, variance: ItemVariance) => {
+      if (tooltipTimerRef.current) clearTimeout(tooltipTimerRef.current);
+      const rect = e.currentTarget.getBoundingClientRect();
+      const vpH = window.innerHeight;
+      const estH = 280;
+      const y = rect.bottom + estH > vpH ? rect.top - estH - 4 : rect.bottom + 4;
+      setTooltip({ variance, x: rect.left, y });
+    },
+    [],
+  );
+
+  const handleItemNameLeave = useCallback(() => {
+    tooltipTimerRef.current = setTimeout(() => setTooltip(null), 160);
+  }, []);
+
+  const handleTooltipEnter = useCallback(() => {
+    if (tooltipTimerRef.current) clearTimeout(tooltipTimerRef.current);
+  }, []);
+
+  const handleTooltipLeave = useCallback(() => {
+    tooltipTimerRef.current = setTimeout(() => setTooltip(null), 160);
+  }, []);
+
+  const getFieldVal = useCallback(
+    (pv: { combinedUnitPrice: number; materialUnitPrice: number; feeUnitPrice: number }) =>
+      priceField === "combined" ? pv.combinedUnitPrice
+      : priceField === "material" ? pv.materialUnitPrice
+      : pv.feeUnitPrice,
+    [priceField],
+  );
+
+  const getTotalFieldVal = useCallback(
+    (pv: { combinedTotal: number; materialTotal: number; feeTotal: number }) =>
+      priceField === "combined" ? pv.combinedTotal
+      : priceField === "material" ? pv.materialTotal
+      : pv.feeTotal,
+    [priceField],
+  );
 
   const allVariances = useMemo(() => computeVariances(result.items, skipZero), [result.items, skipZero]);
 
   const sortedVariances = useMemo(() => {
     let filtered = allVariances;
     if (!showAll) {
+      // recalculate spread using only visible versions so the filter is accurate
       filtered = allVariances.filter((v) => {
-        const pct = priceField === "combined" ? v.spreadPctCombined
-          : priceField === "material" ? v.spreadPctMaterial
-          : v.spreadPctFee;
-        return pct >= minSpreadPct;
+        if (mode === "total") {
+          // Filter by minimum total spread (Ft)
+          const totalVals = v.item.perVersion
+            .map((pv, i) => (hiddenVersionIdxs.has(i) || !pv ? null : getTotalFieldVal(pv)))
+            .filter((p): p is number => p !== null && (!skipZero || p !== 0));
+          if (totalVals.length < 2) return false;
+          const spread = Math.max(...totalVals) - Math.min(...totalVals);
+          return spread >= minSpreadTotal;
+        }
+        const vals = v.item.perVersion
+          .map((pv, i) => (hiddenVersionIdxs.has(i) || !pv ? null : getFieldVal(pv)))
+          .filter((p): p is number => p !== null && (!skipZero || p !== 0));
+        if (vals.length < 2) return false;
+        const avg = vals.reduce((s, x) => s + x, 0) / vals.length;
+        const spread = Math.max(...vals) - Math.min(...vals);
+        return avg > 0 ? (spread / avg) * 100 >= minSpreadPct : false;
+      });
+    }
+
+    if (sortByVersion) {
+      const { idx, dir } = sortByVersion;
+      return [...filtered].sort((a, b) => {
+        const aPv = a.item.perVersion[idx];
+        const bPv = b.item.perVersion[idx];
+        // Use total or unit price depending on current mode
+        const aPrice = mode === "total"
+          ? (aPv ? getTotalFieldVal(aPv) : null)
+          : (aPv ? getFieldVal(aPv) : null);
+        const bPrice = mode === "total"
+          ? (bPv ? getTotalFieldVal(bPv) : null)
+          : (bPv ? getFieldVal(bPv) : null);
+        // Items without a price for this vendor go to the end
+        if (aPrice === null && bPrice === null) return 0;
+        if (aPrice === null) return 1;
+        if (bPrice === null) return -1;
+
+        // Helper: visible prices for a given variance row (excluding hidden versions)
+        const visiblePrices = (variance: ItemVariance): number[] =>
+          variance.item.perVersion
+            .map((pv, i) => (hiddenVersionIdxs.has(i) || !pv ? null : mode === "total" ? getTotalFieldVal(pv) : getFieldVal(pv)))
+            .filter((p): p is number => p !== null && (!skipZero || p !== 0));
+
+        if (dir === "asc") {
+          // Legdrágább elöl: sort by relative surplus over cheapest visible competitor
+          const aMin = Math.min(...visiblePrices(a));
+          const bMin = Math.min(...visiblePrices(b));
+          const aDev = aMin > 0 ? (aPrice - aMin) / aMin : aPrice - aMin;
+          const bDev = bMin > 0 ? (bPrice - bMin) / bMin : bPrice - bMin;
+          return bDev - aDev;
+        } else {
+          // Legolcsóbb elöl: sort by relative discount vs most expensive visible competitor
+          const aMax = Math.max(...visiblePrices(a));
+          const bMax = Math.max(...visiblePrices(b));
+          const aDev = aMax > 0 ? (aPrice - aMax) / aMax : aPrice - aMax;
+          const bDev = bMax > 0 ? (bPrice - bMax) / bMax : bPrice - bMax;
+          return aDev - bDev;
+        }
       });
     }
 
@@ -594,6 +959,12 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
         const bVal = priceField === "combined" ? b.spreadPctCombined
           : priceField === "material" ? b.spreadPctMaterial : b.spreadPctFee;
         return bVal - aVal;
+      } else if (mode === "total") {
+        const aVal = priceField === "combined" ? a.spreadCombinedTotal
+          : priceField === "material" ? a.spreadMaterialTotal : a.spreadFeeTotal;
+        const bVal = priceField === "combined" ? b.spreadCombinedTotal
+          : priceField === "material" ? b.spreadMaterialTotal : b.spreadFeeTotal;
+        return bVal - aVal;
       } else {
         const aVal = priceField === "combined" ? a.spreadCombined
           : priceField === "material" ? a.spreadMaterial : a.spreadFee;
@@ -602,7 +973,7 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
         return bVal - aVal;
       }
     });
-  }, [allVariances, mode, priceField, minSpreadPct, showAll]);
+  }, [allVariances, mode, priceField, minSpreadPct, minSpreadTotal, showAll, sortByVersion, hiddenVersionIdxs, skipZero, getFieldVal, getTotalFieldVal]);
 
   const versions = result.versions;
   const suspiciousCount = allVariances.filter((v) => v.spreadPctCombined >= 50).length;
@@ -652,7 +1023,7 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                 : "text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
             }`}
           >
-            Százalékos
+            Szórás %
           </button>
           <button
             onClick={() => setMode("absolute")}
@@ -662,7 +1033,18 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                 : "text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
             }`}
           >
-            Összeg
+            E.ár Ft
+          </button>
+          <button
+            onClick={() => setMode("total")}
+            title="Szumma szórás: (max − min) egységár × mennyiség — a volumen miatt nagy pénzügyi hatású tételek"
+            className={`px-2.5 py-[4px] text-xs cursor-pointer transition-colors ${
+              mode === "total"
+                ? "bg-[var(--indigo-600)] text-white"
+                : "text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
+            }`}
+          >
+            Szumma Ft
           </button>
         </div>
 
@@ -676,7 +1058,7 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                 : "text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
             }`}
           >
-            Anyag+Díj
+            A+D
           </button>
           <button
             onClick={() => setPriceField("material")}
@@ -701,7 +1083,7 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
         </div>
 
         {/* Min threshold */}
-        {!showAll && (
+        {!showAll && mode !== "total" && (
           <div className="flex items-center gap-1.5">
             <span className="text-[10px] text-[var(--slate-400)]">Min. szórás:</span>
             <select
@@ -714,6 +1096,24 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
               <option value={20}>20%</option>
               <option value={50}>50%</option>
               <option value={100}>100%</option>
+            </select>
+          </div>
+        )}
+        {!showAll && mode === "total" && (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-[var(--slate-400)]">Min. szumma szórás:</span>
+            <select
+              value={minSpreadTotal}
+              onChange={(e) => setMinSpreadTotal(Number(e.target.value))}
+              className="h-6 px-1.5 border border-[var(--slate-200)] rounded text-xs outline-none bg-white"
+            >
+              <option value={0}>Összes</option>
+              <option value={1000}>1 000 Ft</option>
+              <option value={5000}>5 000 Ft</option>
+              <option value={10000}>10 000 Ft</option>
+              <option value={50000}>50 000 Ft</option>
+              <option value={100000}>100 000 Ft</option>
+              <option value={500000}>500 000 Ft</option>
             </select>
           </div>
         )}
@@ -757,20 +1157,35 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                 </th>
                 {/* Per-version unit price columns */}
                 {versions.map((v, idx) => {
+                  if (hiddenVersionIdxs.has(idx)) return null;
                   const color = getColor(idx);
+                  const isSorted = sortByVersion?.idx === idx;
                   return (
                     <th
                       key={v.versionId}
                       className={`text-right px-3 py-2 font-medium min-w-[100px] ${color.text} ${color.header}`}
                     >
-                      <div className="truncate text-[10px]">{v.versionName}</div>
+                      <button
+                        onClick={() => handleVersionHeaderClick(idx)}
+                        className="w-full text-right cursor-pointer hover:underline flex items-center justify-end gap-0.5"
+                        title={isSorted ? (sortByVersion!.dir === "asc" ? "Legdrágább elöl (hol volt ez az alvállalkozó a legdrágább) — kattints a fordításhoz" : "Legolcsóbb elöl (hol volt ez az alvállalkozó a legolcsóbb) — kattints az alapértelmezetthez") : `Rendezés szórás szerint: ${v.partnerName ?? v.versionName}`}
+                      >
+                        <span className="truncate text-[10px]">{v.partnerName ?? v.versionName}</span>
+                        {isSorted ? (
+                          sortByVersion!.dir === "asc"
+                            ? <ChevronUp size={10} className="shrink-0 text-red-500" />
+                            : <ChevronDown size={10} className="shrink-0 text-green-600" />
+                        ) : (
+                          <ArrowUpDown size={9} className="opacity-30 shrink-0" />
+                        )}
+                      </button>
                     </th>
                   );
                 })}
-                <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium min-w-[80px]">
+                <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium min-w-[90px] whitespace-nowrap">
                   <span className="flex items-center justify-end gap-0.5">
                     <ArrowUpDown size={10} />
-                    {mode === "percentage" ? "Szórás %" : "Szórás Ft"}
+                    {mode === "percentage" ? "Szórás %" : mode === "total" ? "Szumma szórás" : "Szórás Ft"}
                   </span>
                 </th>
                 <th className="text-center px-3 py-2 text-[var(--slate-500)] font-medium min-w-[70px]">
@@ -781,7 +1196,7 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
             <tbody>
               {sortedVariances.length === 0 && (
                 <tr>
-                  <td colSpan={6 + versions.length} className="px-3 py-8 text-center text-[var(--slate-400)]">
+                  <td colSpan={6 + versions.length - hiddenVersionIdxs.size} className="px-3 py-8 text-center text-[var(--slate-400)]">
                     Nincs a szűrési feltételeknek megfelelő tétel.
                   </td>
                 </tr>
@@ -791,19 +1206,23 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                   : priceField === "material" ? v.spreadPctMaterial : v.spreadPctFee;
                 const spreadAbs = priceField === "combined" ? v.spreadCombined
                   : priceField === "material" ? v.spreadMaterial : v.spreadFee;
+                const spreadTotal = priceField === "combined" ? v.spreadCombinedTotal
+                  : priceField === "material" ? v.spreadMaterialTotal : v.spreadFeeTotal;
                 const severity = getSeverity(spreadPct);
 
-                // Per-version unit prices for selected field
-                const unitPrices = v.item.perVersion.map((pv) => {
+                // Per-version display values: unit price or total depending on mode
+                const displayPrices = v.item.perVersion.map((pv, i) => {
+                  if (hiddenVersionIdxs.has(i)) return "hidden" as const;
                   if (!pv) return null;
-                  return priceField === "combined" ? pv.combinedUnitPrice
-                    : priceField === "material" ? pv.materialUnitPrice
-                    : pv.feeUnitPrice;
+                  return mode === "total" ? getTotalFieldVal(pv) : getFieldVal(pv);
                 });
 
-                const existingPrices = unitPrices.filter((p): p is number => p !== null && (!skipZero || p !== 0));
-                const minPrice = existingPrices.length > 0 ? Math.min(...existingPrices) : 0;
-                const maxPrice = existingPrices.length > 0 ? Math.max(...existingPrices) : 0;
+                // Min/max only among visible, non-zero prices
+                const visibleDisplayPrices = displayPrices.filter(
+                  (p): p is number => typeof p === "number" && (!skipZero || p !== 0),
+                );
+                const minPrice = visibleDisplayPrices.length > 1 ? Math.min(...visibleDisplayPrices) : -Infinity;
+                const maxPrice = visibleDisplayPrices.length > 1 ? Math.max(...visibleDisplayPrices) : Infinity;
 
                 return (
                   <tr
@@ -818,8 +1237,15 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                     <td className="px-3 py-2 font-mono text-[10px] text-[var(--slate-500)]">
                       {v.item.itemNumber || "—"}
                     </td>
-                    <td className="px-3 py-2 text-[var(--slate-800)]">
-                      <div className="truncate max-w-[250px]" title={v.item.name}>
+                    <td
+                      className="px-3 py-2 text-[var(--slate-800)] cursor-help"
+                      onMouseEnter={(e) => handleItemNameEnter(e, v)}
+                      onMouseLeave={handleItemNameLeave}
+                    >
+                      <div
+                        className="truncate max-w-[250px] underline decoration-dotted decoration-[var(--slate-300)] underline-offset-2"
+                        title="Húzza fölé a részletes árak megjelenítéséhez"
+                      >
                         {v.item.name}
                       </div>
                     </td>
@@ -831,7 +1257,8 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                     <td className="px-3 py-2 text-center text-[var(--slate-500)]">
                       {v.item.unit}
                     </td>
-                    {unitPrices.map((price, idx) => {
+                    {displayPrices.map((price, idx) => {
+                      if (price === "hidden") return null;
                       if (price === null) {
                         return (
                           <td key={idx} className="px-3 py-2 text-right text-[var(--slate-300)]">
@@ -839,8 +1266,8 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                           </td>
                         );
                       }
-                      const isMin = price === minPrice && existingPrices.length > 1;
-                      const isMax = price === maxPrice && existingPrices.length > 1;
+                      const isMin = price === minPrice && visibleDisplayPrices.length > 1;
+                      const isMax = price === maxPrice && visibleDisplayPrices.length > 1;
                       return (
                         <td key={idx} className="px-3 py-2 text-right">
                           <span
@@ -848,16 +1275,18 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
                               isMin ? "text-green-700" : isMax ? "text-red-700" : "text-[var(--slate-700)]"
                             }`}
                           >
-                            {fmtDetailed(price)}
+                            {mode === "total" ? fmt(price) : fmtDetailed(price)}
                           </span>
                           {isMin && <span className="ml-0.5 text-[9px] text-green-600">▼</span>}
                           {isMax && <span className="ml-0.5 text-[9px] text-red-600">▲</span>}
                         </td>
                       );
                     })}
-                    <td className="px-3 py-2 text-right font-bold">
+                    <td className="px-3 py-2 text-right font-bold whitespace-nowrap">
                       {mode === "percentage" ? (
                         <span className={severity.cls}>{spreadPct.toFixed(1)}%</span>
+                      ) : mode === "total" ? (
+                        <span className={severity.cls}>{fmt(spreadTotal)}</span>
                       ) : (
                         <span className={severity.cls}>{fmtDetailed(spreadAbs)}</span>
                       )}
@@ -874,6 +1303,20 @@ function VarianceView({ result, skipZero }: { result: MultiComparisonResult; ski
           </table>
         </div>
       </div>
+
+      {/* Item detail tooltip rendered in a portal to avoid overflow clipping */}
+      {typeof document !== "undefined" && tooltip &&
+        createPortal(
+          <ItemDetailTooltip
+            state={tooltip}
+            versions={versions}
+            hiddenVersionIdxs={hiddenVersionIdxs}
+            skipZero={skipZero}
+            onEnter={handleTooltipEnter}
+            onLeave={handleTooltipLeave}
+          />,
+          document.body,
+        )}
     </div>
   );
 }
@@ -889,6 +1332,17 @@ export function MultiVersionComparison({
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [skipZero, setSkipZero] = useState(false);
+  // Version indices hidden from ALL comparison views
+  const [hiddenVersionIdxs, setHiddenVersionIdxs] = useState<Set<number>>(new Set());
+
+  const toggleVersionHide = useCallback((idx: number) => {
+    setHiddenVersionIdxs((prev) => {
+      const next = new Set(prev);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -916,16 +1370,23 @@ export function MultiVersionComparison({
         <span className="text-sm font-semibold text-[var(--slate-800)]">
           Összehasonlítás ({result.versions.length} verzió)
         </span>
-        <div className="flex items-center gap-1 ml-2">
+        <div className="flex items-center gap-1 ml-2 flex-wrap">
           {result.versions.map((v, idx) => {
             const color = getColor(idx);
+            const isHidden = hiddenVersionIdxs.has(idx);
             return (
-              <span
+              <button
                 key={v.versionId}
-                className={`group/note relative inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full ${color.bg} ${color.text} ${color.border} border`}
+                onClick={() => toggleVersionHide(idx)}
+                title={isHidden ? "Kattints a visszavételhez" : "Kattints a kizáráshoz"}
+                className={`group/note relative inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full border cursor-pointer transition-all select-none ${
+                  isHidden
+                    ? "opacity-35 grayscale bg-[var(--slate-100)] text-[var(--slate-400)] border-[var(--slate-200)] line-through"
+                    : `${color.bg} ${color.text} ${color.border} hover:opacity-80`
+                }`}
               >
                 {v.versionName}
-                {v.notes && (
+                {!isHidden && v.notes && (
                   <>
                     <MessageSquare size={9} className="text-[var(--amber-500)]" />
                     <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 hidden group-hover/note:block z-50 w-max max-w-[260px] px-2.5 py-1.5 rounded-md bg-[var(--slate-800)] text-[10px] text-white shadow-lg whitespace-pre-wrap pointer-events-none font-normal">
@@ -933,7 +1394,7 @@ export function MultiVersionComparison({
                     </span>
                   </>
                 )}
-              </span>
+              </button>
             );
           })}
         </div>
@@ -989,9 +1450,9 @@ export function MultiVersionComparison({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto bg-[var(--slate-50)]">
-        {viewMode === "overview" && <OverviewView result={result} skipZero={skipZero} />}
-        {viewMode === "sections" && <SectionsView result={result} skipZero={skipZero} />}
-        {viewMode === "variance" && <VarianceView result={result} skipZero={skipZero} />}
+        {viewMode === "overview" && <OverviewView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} />}
+        {viewMode === "sections" && <SectionsView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} />}
+        {viewMode === "variance" && <VarianceView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} />}
       </div>
     </div>
   );

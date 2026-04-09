@@ -715,6 +715,12 @@ export interface MultiVersionItemPrice {
   materialUnitPrice: number;
   feeUnitPrice: number;
   combinedUnitPrice: number;
+  /** Quantity × material unit price */
+  materialTotal: number;
+  /** Quantity × fee unit price */
+  feeTotal: number;
+  /** Quantity × combined unit price */
+  combinedTotal: number;
 }
 
 export interface MultiComparisonResult {
@@ -816,6 +822,9 @@ export async function compareMultipleVersions(
               materialUnitPrice: item.materialUnitPrice,
               feeUnitPrice: item.feeUnitPrice,
               combinedUnitPrice: item.materialUnitPrice + item.feeUnitPrice,
+              materialTotal: item.quantity * item.materialUnitPrice,
+              feeTotal: item.quantity * item.feeUnitPrice,
+              combinedTotal: item.quantity * (item.materialUnitPrice + item.feeUnitPrice),
             }
           : null
       );
