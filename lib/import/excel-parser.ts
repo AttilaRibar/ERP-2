@@ -70,20 +70,41 @@ export interface ExcelParseStrategy {
 
 // ---- Hungarian budget format strategy ----
 
-/** Column indices for the standard Hungarian budget format */
-const COL = {
-  SSZ: 0,         // Sorszám (sequence number)
-  ITEM_NUM: 1,    // Tételszám (item code)
-  NAME: 2,        // Tétel szövege (description)
-  QUANTITY: 3,    // Mennyiség
-  UNIT: 4,        // Egység
-  MAT_UNIT: 5,    // Anyag egységár
-  FEE_UNIT: 6,    // Díj egységár
-  MAT_TOTAL: 7,   // Anyag összesen
-  FEE_TOTAL: 8,   // Díj összesen
-} as const;
+/** Column mapping for a sheet — detected dynamically from the header row */
+interface ColumnMap {
+  SSZ: number;
+  ITEM_NUM: number | null; // null for gyengeáram (no tételszám column)
+  NAME: number;
+  QUANTITY: number;
+  UNIT: number;
+  MAT_UNIT: number;
+  FEE_UNIT: number;
+  MAT_TOTAL: number;
+  FEE_TOTAL: number;
+}
 
-/** Known header variations for auto-detection */
+/** Standard 9-column layout (Ssz | Tételszám | Tétel szövege | Menny | Egység | Anyag | Díj | Anyag össz | Díj össz) */
+const COL_STANDARD: ColumnMap = {
+  SSZ: 0, ITEM_NUM: 1, NAME: 2, QUANTITY: 3, UNIT: 4,
+  MAT_UNIT: 5, FEE_UNIT: 6, MAT_TOTAL: 7, FEE_TOTAL: 8,
+};
+
+/** Gyengeáram 8-column layout (Tétel | Megnevezés | Mennyiség | Egység | Anyag egységár | Munkadíj egységár | Anyag összesen | Munkadíj összesen) */
+const COL_GYENGERAM: ColumnMap = {
+  SSZ: 0, ITEM_NUM: null, NAME: 1, QUANTITY: 2, UNIT: 3,
+  MAT_UNIT: 4, FEE_UNIT: 5, MAT_TOTAL: 6, FEE_TOTAL: 7,
+};
+
+/** Gépész 10-column layout (Ssz | Tételszám | Tétel szövege | Menny | Egység | Egys. anyag | Egys. gépköltség | Egys. díj | Anyag összesen | Díj összesen) */
+const COL_GEPESZ: ColumnMap = {
+  SSZ: 0, ITEM_NUM: 1, NAME: 2, QUANTITY: 3, UNIT: 4,
+  MAT_UNIT: 5, FEE_UNIT: 7, MAT_TOTAL: 8, FEE_TOTAL: 9,
+};
+
+/** Backward-compatible alias for code that uses COL.xxx directly */
+const COL = COL_STANDARD;
+
+/** Known header variations for standard format auto-detection */
 const HEADER_PATTERNS = [
   /^ssz\.?$/i,
   /^t[eé]telsz[aá]m$/i,
@@ -96,11 +117,45 @@ const HEADER_PATTERNS = [
   /^d[ií]j\s*[oö]sszesen$/i,
 ];
 
+/** Detect the column layout from a header row */
+function detectColumnMap(row: unknown[]): { colMap: ColumnMap; headerIdx: number } | null {
+  if (!row || row.length < 5) return null;
+  const cells = row.map((c) => (typeof c === "string" ? c.trim().toLowerCase() : ""));
+
+  // Standard format: check positional patterns
+  const stdMatches = cells.slice(0, 9).filter((cell, i) => HEADER_PATTERNS[i]?.test(cell));
+  if (stdMatches.length >= 3) {
+    // Check if there's an extra "gépköltség" column (gépész layout)
+    const hasGepkoltseg = cells.some((c) => /g[eé]pk[oö]lts[eé]g/i.test(c));
+    if (hasGepkoltseg) {
+      return { colMap: COL_GEPESZ, headerIdx: -1 };
+    }
+    return { colMap: COL_STANDARD, headerIdx: -1 };
+  }
+
+  // Gyengeáram format: "Tétel" + "Megnevezés" + "Mennyiség" + "Egység"
+  const hasTétel = cells.some((c) => /^t[eé]tel$/i.test(c));
+  const hasMegnevezés = cells.some((c) => /^megnevez[eé]s$/i.test(c));
+  const hasMennyiség = cells.some((c) => /^mennyis[eé]g$/i.test(c));
+  if (hasTétel && hasMegnevezés && hasMennyiség) {
+    return { colMap: COL_GYENGERAM, headerIdx: -1 };
+  }
+
+  return null;
+}
+
+/** Check if a row is any recognized header row */
+function isAnyHeaderRow(row: unknown[]): boolean {
+  return detectColumnMap(row) !== null;
+}
+
 /** Sheets to skip (no budget items expected) */
 const SKIP_SHEET_PATTERNS = [
   /z[aá]rad[eé]k/i,
   /fejezet\s*[oö]sszesít/i,
   /[oö]sszesít[oő]/i,
+  /^[oö]sszesít[oő]/i,
+  /^munkanem\s*[oö]sszesít/i,
   /summary/i,
   /cover/i,
 ];
@@ -110,51 +165,92 @@ function shouldSkipSheet(name: string): boolean {
 }
 
 function isHeaderRow(row: unknown[]): boolean {
-  if (!row || row.length < 5) return false;
-  const matches = row
-    .slice(0, 9)
-    .filter((cell, i) => {
-      if (typeof cell !== "string") return false;
-      return HEADER_PATTERNS[i]?.test(cell.trim());
-    });
-  return matches.length >= 3;
+  return isAnyHeaderRow(row);
 }
 
-function isSummaryRow(row: unknown[]): boolean {
-  const text = String(row[COL.NAME] ?? "").toLowerCase();
-  return (
+function isEmptyCell(val: unknown): boolean {
+  return val === "" || val === undefined || val === null || val === 0;
+}
+
+function isSummaryRow(row: unknown[], col: ColumnMap = COL_STANDARD): boolean {
+  const check = (text: string) =>
     text.includes("fejezet összesen") ||
     text.includes("összesen:") ||
-    text.includes("mindösszesen")
-  );
-}
-
-function isCategoryRow(row: unknown[]): boolean {
-  const ssz = row[COL.SSZ];
-  const name = row[COL.NAME];
-  // Category rows have text in first column and nothing or empty in the item columns
-  if (typeof ssz === "string" && ssz.trim().length > 0) {
-    // Check no numeric data in quantity/price columns
-    const q = row[COL.QUANTITY];
-    const matUnit = row[COL.MAT_UNIT];
-    const feeUnit = row[COL.FEE_UNIT];
-    if (
-      (q === "" || q === undefined || q === null || q === 0) &&
-      (matUnit === "" || matUnit === undefined || matUnit === null || matUnit === 0) &&
-      (feeUnit === "" || feeUnit === undefined || feeUnit === null || feeUnit === 0)
-    ) {
-      return true;
-    }
+    text.includes("összesen (huf)") ||
+    text.includes("mindösszesen");
+  const nameText = String(row[col.NAME] ?? "").toLowerCase();
+  if (check(nameText)) return true;
+  // Also check Tételszám column — some formats place summary text there
+  if (col.ITEM_NUM !== null) {
+    const itemText = String(row[col.ITEM_NUM] ?? "").toLowerCase();
+    if (check(itemText)) return true;
   }
   return false;
 }
 
-function isDataRow(row: unknown[]): boolean {
-  const ssz = row[COL.SSZ];
-  const name = row[COL.NAME];
+function isCategoryRow(row: unknown[], col: ColumnMap = COL_STANDARD): boolean {
+  const ssz = row[col.SSZ];
+  const numericEmpty = isEmptyCell(row[col.QUANTITY]) && isEmptyCell(row[col.MAT_UNIT]) && isEmptyCell(row[col.FEE_UNIT]);
+
+  // Pattern 1: Category text in SSZ column (col[0])
+  if (typeof ssz === "string" && ssz.trim().length > 0 && numericEmpty) {
+    return true;
+  }
+
+  // Pattern 2: Category text in name column with SSZ empty — common in Hungarian
+  // construction budgets where the munkanem/category name appears in the name
+  // or item number column with SSZ and all other data columns empty
+  const nameVal = row[col.NAME];
+  if (
+    typeof nameVal === "string" &&
+    nameVal.trim().length > 0 &&
+    isEmptyCell(ssz) &&
+    numericEmpty
+  ) {
+    // For standard layout, only match if NAME col is empty and text is in ITEM_NUM
+    // For gyengeáram layout (no ITEM_NUM), text in NAME col is the category
+    if (col.ITEM_NUM === null) {
+      return true;
+    }
+  }
+
+  // Pattern 3: Category text in Tételszám column (col[1]) for standard layout
+  if (col.ITEM_NUM !== null) {
+    const itemNum = row[col.ITEM_NUM];
+    if (
+      typeof itemNum === "string" &&
+      itemNum.trim().length > 0 &&
+      isEmptyCell(ssz) &&
+      isEmptyCell(row[col.NAME]) &&
+      numericEmpty
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/** Extract the category name from a row detected as a category row */
+function getCategoryName(row: unknown[], col: ColumnMap = COL_STANDARD): string {
+  const ssz = String(row[col.SSZ] ?? "").trim();
+  if (ssz) return ssz;
+  if (col.ITEM_NUM !== null) {
+    const itemNum = String(row[col.ITEM_NUM] ?? "").trim();
+    if (itemNum) return itemNum;
+  }
+  return String(row[col.NAME] ?? "").trim();
+}
+
+function isDataRow(row: unknown[], col: ColumnMap = COL_STANDARD): boolean {
+  const ssz = row[col.SSZ];
+  const name = row[col.NAME];
+  // Accept both numeric SSZ and text-formatted numeric SSZ
+  const sszNum = typeof ssz === "number" ? ssz
+    : (typeof ssz === "string" ? parseFloat(ssz.replace(/\s/g, "")) : NaN);
   return (
-    typeof ssz === "number" &&
-    ssz > 0 &&
+    !isNaN(sszNum) &&
+    sszNum > 0 &&
     typeof name === "string" &&
     name.trim().length > 0
   );
@@ -172,12 +268,15 @@ function toNumber(val: unknown): number {
 
 export class HungarianBudgetStrategy implements ExcelParseStrategy {
   canHandle(workbook: XLSX.WorkBook): boolean {
-    // Check if any sheet has the expected header structure
+    // Check if any sheet has the expected header structure (standard or gyengeáram)
     for (const name of workbook.SheetNames) {
       const ws = workbook.Sheets[name];
       if (!ws) continue;
       const data = XLSX.utils.sheet_to_json(ws, { header: 1, defval: "" }) as unknown[][];
-      if (data.length > 0 && isHeaderRow(data[0])) return true;
+      const maxScan = Math.min(data.length, 20);
+      for (let i = 0; i < maxScan; i++) {
+        if (isAnyHeaderRow(data[i])) return true;
+      }
     }
     // Also check for "Fejezet összesítő" or "Záradék" sheets
     return workbook.SheetNames.some(
@@ -216,35 +315,51 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
       const subCategories: Set<string> = new Set();
       let seqCounter = 0;
 
+      // Find the header row and detect column layout
+      let headerRowIdx = -1;
+      let col: ColumnMap = COL_STANDARD;
+      const maxScan = Math.min(data.length, 20);
+      for (let i = 0; i < maxScan; i++) {
+        const detected = detectColumnMap(data[i]);
+        if (detected) {
+          headerRowIdx = i;
+          col = detected.colMap;
+          break;
+        }
+      }
+
       for (let rowIdx = 0; rowIdx < data.length; rowIdx++) {
         const row = data[rowIdx];
         if (!row || row.length === 0) continue;
 
-        // Skip header row
+        // Skip rows up to and including the header row (title/metadata rows)
+        if (headerRowIdx >= 0 && rowIdx <= headerRowIdx) continue;
+
+        // Skip additional header rows (e.g. repeated headers from merged cells)
         if (isHeaderRow(row)) continue;
 
         // Skip summary row
-        if (isSummaryRow(row)) continue;
+        if (isSummaryRow(row, col)) continue;
 
         // Category row
-        if (isCategoryRow(row)) {
-          currentSubCategory = String(row[COL.SSZ]).trim();
-          subCategories.add(currentSubCategory);
+        if (isCategoryRow(row, col)) {
+          currentSubCategory = getCategoryName(row, col);
+          if (currentSubCategory) subCategories.add(currentSubCategory);
           continue;
         }
 
         // Data row
-        if (isDataRow(row)) {
+        if (isDataRow(row, col)) {
           seqCounter++;
-          const quantity = toNumber(row[COL.QUANTITY]);
-          const matUnit = toNumber(row[COL.MAT_UNIT]);
-          const feeUnit = toNumber(row[COL.FEE_UNIT]);
+          const quantity = toNumber(row[col.QUANTITY]);
+          const matUnit = toNumber(row[col.MAT_UNIT]);
+          const feeUnit = toNumber(row[col.FEE_UNIT]);
           const matTotal = quantity * matUnit;
           const feeTotal = quantity * feeUnit;
 
           // Verify totals match Excel (warning if not)
-          const excelMatTotal = toNumber(row[COL.MAT_TOTAL]);
-          const excelFeeTotal = toNumber(row[COL.FEE_TOTAL]);
+          const excelMatTotal = toNumber(row[col.MAT_TOTAL]);
+          const excelFeeTotal = toNumber(row[col.FEE_TOTAL]);
           if (excelMatTotal !== 0 && Math.abs(matTotal - excelMatTotal) > 1) {
             warnings.push({
               sheet: sheetName,
@@ -264,10 +379,10 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
 
           items.push({
             sequenceNo: seqCounter,
-            itemNumber: String(row[COL.ITEM_NUM] ?? "").trim(),
-            name: String(row[COL.NAME] ?? "").trim(),
+            itemNumber: col.ITEM_NUM !== null ? String(row[col.ITEM_NUM] ?? "").trim() : "",
+            name: String(row[col.NAME] ?? "").trim(),
             quantity,
-            unit: String(row[COL.UNIT] ?? "").trim(),
+            unit: String(row[col.UNIT] ?? "").trim(),
             materialUnitPrice: matUnit,
             feeUnitPrice: feeUnit,
             materialTotal: matTotal,

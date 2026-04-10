@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, Trophy, ChevronDown, ChevronRight, ChevronUp, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff, X } from "lucide-react";
+import { ArrowLeft, Trophy, ChevronDown, ChevronRight, ChevronUp, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff, X, GripVertical, Pin } from "lucide-react";
 import {
   compareMultipleVersions,
   type MultiComparisonResult,
@@ -26,6 +26,11 @@ function fmtDetailed(n: number): string {
 }
 
 type ViewMode = "overview" | "sections" | "variance";
+
+interface VersionEntry {
+  version: MultiVersionEntry;
+  originalIdx: number;
+}
 
 // Color palette for version columns
 const VERSION_COLORS = [
@@ -54,11 +59,26 @@ function findCheapestIdx(values: number[], skipZero = false): number {
 
 // ---- Overview Cards ----
 
-function OverviewView({ result, skipZero, hiddenVersionIdxs }: { result: MultiComparisonResult; skipZero: boolean; hiddenVersionIdxs: Set<number> }) {
-  const versions = result.versions.filter((_, i) => !hiddenVersionIdxs.has(i));
-  const cheapestCombinedIdx = findCheapestIdx(versions.map((v) => v.totalCombined), skipZero);
-  const cheapestMaterialIdx = findCheapestIdx(versions.map((v) => v.totalMaterial), skipZero);
-  const cheapestFeeIdx = findCheapestIdx(versions.map((v) => v.totalFee), skipZero);
+function OverviewView({
+  result,
+  skipZero,
+  hiddenVersionIdxs,
+  orderedVersions,
+  referenceVersionIdx,
+}: {
+  result: MultiComparisonResult;
+  skipZero: boolean;
+  hiddenVersionIdxs: Set<number>;
+  orderedVersions: VersionEntry[];
+  referenceVersionIdx: number | null;
+}) {
+  void result;
+  const visible = orderedVersions.filter((x) => !hiddenVersionIdxs.has(x.originalIdx));
+  const versions = visible.map((x) => x.version);
+  const cheapestCombinedPos = findCheapestIdx(versions.map((v) => v.totalCombined), skipZero);
+  const cheapestMaterialPos = findCheapestIdx(versions.map((v) => v.totalMaterial), skipZero);
+  const cheapestFeePos = findCheapestIdx(versions.map((v) => v.totalFee), skipZero);
+  const refEntry = referenceVersionIdx !== null ? visible.find((x) => x.originalIdx === referenceVersionIdx) ?? null : null;
 
   // Percentage bars relative to max
   const maxCombined = Math.max(...versions.map((v) => v.totalCombined), 1);
@@ -66,16 +86,23 @@ function OverviewView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
   return (
     <div className="p-4 space-y-6">
       {/* Summary cards */}
-      <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(versions.length, 4)}, minmax(0, 1fr))` }}>
-        {versions.map((v, idx) => {
-          const color = getColor(idx);
-          const isCheapest = idx === cheapestCombinedIdx;
+      <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${Math.min(visible.length, 4)}, minmax(0, 1fr))` }}>
+        {visible.map(({ version: v, originalIdx }, displayPos) => {
+          const color = getColor(originalIdx);
+          const isCheapest = displayPos === cheapestCombinedPos;
+          const isRef = originalIdx === referenceVersionIdx;
           return (
             <div
               key={v.versionId}
-              className={`rounded-lg border-2 p-4 relative ${color.border} ${color.bg} ${isCheapest ? `ring-2 ${color.ring}` : ""}`}
+              className={`rounded-lg border-2 p-4 relative ${color.border} ${color.bg} ${isRef ? "ring-2 ring-amber-400" : isCheapest ? `ring-2 ${color.ring}` : ""}`}
             >
-              {isCheapest && (
+              {isRef && (
+                <div className="absolute -top-3 left-3 flex items-center gap-1 px-2 py-0.5 bg-amber-500 text-white text-[10px] font-bold rounded-full shadow">
+                  <Pin size={10} />
+                  Referencia
+                </div>
+              )}
+              {isCheapest && !isRef && (
                 <div className="absolute -top-3 left-3 flex items-center gap-1 px-2 py-0.5 bg-green-600 text-white text-[10px] font-bold rounded-full shadow">
                   <Trophy size={10} />
                   Legolcsóbb
@@ -106,13 +133,13 @@ function OverviewView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
                 <div className="flex gap-3">
                   <div className="flex-1">
                     <div className="text-[10px] text-[var(--slate-400)]">Anyag</div>
-                    <div className={`text-sm font-semibold ${idx === cheapestMaterialIdx ? "text-green-700" : "text-[var(--slate-700)]"}`}>
+                    <div className={`text-sm font-semibold ${displayPos === cheapestMaterialPos ? "text-green-700" : "text-[var(--slate-700)]"}`}>
                       {fmt(v.totalMaterial)}
                     </div>
                   </div>
                   <div className="flex-1">
                     <div className="text-[10px] text-[var(--slate-400)]">Díj</div>
-                    <div className={`text-sm font-semibold ${idx === cheapestFeeIdx ? "text-green-700" : "text-[var(--slate-700)]"}`}>
+                    <div className={`text-sm font-semibold ${displayPos === cheapestFeePos ? "text-green-700" : "text-[var(--slate-700)]"}`}>
                       {fmt(v.totalFee)}
                     </div>
                   </div>
@@ -128,22 +155,26 @@ function OverviewView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
       <div className="bg-white rounded-lg border border-[var(--slate-200)] p-4">
         <div className="text-xs font-semibold text-[var(--slate-700)] mb-3">Összesített összehasonlítás</div>
         <div className="space-y-3">
-          {versions.map((v, idx) => {
-            const color = getColor(idx);
+          {visible.map(({ version: v, originalIdx }, displayPos) => {
+            const color = getColor(originalIdx);
             const pct = (v.totalCombined / maxCombined) * 100;
-            const isCheapest = idx === cheapestCombinedIdx;
+            const isCheapest = displayPos === cheapestCombinedPos;
+            const isRef = originalIdx === referenceVersionIdx;
             return (
               <div key={v.versionId}>
                 <div className="flex items-center justify-between mb-1">
-                  <span className={`text-xs font-medium ${color.text}`}>{v.versionName}</span>
+                  <span className={`text-xs font-medium flex items-center gap-1 ${color.text}`}>
+                    {isRef && <Pin size={9} className="text-amber-500 shrink-0" />}
+                    {v.versionName}
+                  </span>
                   <span className={`text-xs font-bold ${isCheapest ? "text-green-700" : "text-[var(--slate-700)]"}`}>
                     {fmt(v.totalCombined)}
-                    {isCheapest && <Trophy size={10} className="inline ml-1 text-green-600" />}
+                    {isCheapest && !isRef && <Trophy size={10} className="inline ml-1 text-green-600" />}
                   </span>
                 </div>
                 <div className="h-5 bg-[var(--slate-100)] rounded-full overflow-hidden">
                   <div
-                    className={`h-full rounded-full transition-all ${isCheapest ? "bg-green-500" : "bg-[var(--slate-400)]"}`}
+                    className={`h-full rounded-full transition-all ${isRef ? "bg-amber-400" : isCheapest ? "bg-green-500" : "bg-[var(--slate-400)]"}`}
                     style={{ width: `${pct}%` }}
                   />
                 </div>
@@ -162,45 +193,70 @@ function OverviewView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
               <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium">Anyag összesen</th>
               <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium">Díj összesen</th>
               <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium">Összesen</th>
-              <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium">Eltérés a legolcsóbbtól</th>
+              <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium">
+                {refEntry ? "Eltérés a referenciától" : "Eltérés a legolcsóbbtól"}
+              </th>
               <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium">Tételszám</th>
             </tr>
           </thead>
           <tbody>
-            {versions.map((v, idx) => {
-              const isCheapest = idx === cheapestCombinedIdx;
-              const cheapest = versions[cheapestCombinedIdx].totalCombined;
-              const diff = v.totalCombined - cheapest;
-              const diffPct = cheapest > 0 ? (diff / cheapest) * 100 : 0;
+            {visible.map(({ version: v, originalIdx }, displayPos) => {
+              const isCheapest = displayPos === cheapestCombinedPos;
+              const isRef = originalIdx === referenceVersionIdx;
+              let diffCell: React.ReactNode;
+              if (refEntry) {
+                if (isRef) {
+                  diffCell = (
+                    <span className="flex items-center gap-1 justify-end text-amber-700 font-semibold">
+                      <Pin size={9} />
+                      Referencia
+                    </span>
+                  );
+                } else {
+                  const diff = v.totalCombined - refEntry.version.totalCombined;
+                  const diffPct = refEntry.version.totalCombined > 0 ? (diff / refEntry.version.totalCombined) * 100 : 0;
+                  const sign = diff >= 0 ? "+" : "";
+                  const cls = diff > 0 ? "text-red-600" : diff < 0 ? "text-green-700" : "text-[var(--slate-500)]";
+                  diffCell = (
+                    <span className={`font-medium ${cls}`}>
+                      {sign}{fmtDetailed(diff)} ({sign}{diffPct.toFixed(1)}%)
+                    </span>
+                  );
+                }
+              } else {
+                const cheapestTotal = versions[cheapestCombinedPos]?.totalCombined ?? 0;
+                const diff = v.totalCombined - cheapestTotal;
+                const diffPct = cheapestTotal > 0 ? (diff / cheapestTotal) * 100 : 0;
+                diffCell = isCheapest ? (
+                  <span className="text-green-700 font-semibold">—</span>
+                ) : (
+                  <span className="text-red-600 font-medium">
+                    +{fmtDetailed(diff)} ({diffPct.toFixed(1)}%)
+                  </span>
+                );
+              }
               return (
-                <tr key={v.versionId} className={isCheapest ? "bg-green-50" : ""}>
+                <tr key={v.versionId} className={isRef ? "bg-amber-50" : isCheapest ? "bg-green-50" : ""}>
                   <td className="px-3 py-2 font-medium text-[var(--slate-800)]">
                     <span className="flex items-center gap-1.5">
+                      {isRef && <Pin size={10} className="text-amber-500" />}
                       {v.versionName}
-                      {isCheapest && <Trophy size={10} className="text-green-600" />}
+                      {isCheapest && !isRef && <Trophy size={10} className="text-green-600" />}
                     </span>
                     {v.partnerName && (
                       <span className="text-[10px] text-[var(--slate-400)]">{v.partnerName}</span>
                     )}
                   </td>
-                  <td className={`px-3 py-2 text-right font-medium ${idx === cheapestMaterialIdx ? "text-green-700" : ""}`}>
+                  <td className={`px-3 py-2 text-right font-medium ${displayPos === cheapestMaterialPos ? "text-green-700" : ""}`}>
                     {fmtDetailed(v.totalMaterial)}
                   </td>
-                  <td className={`px-3 py-2 text-right font-medium ${idx === cheapestFeeIdx ? "text-green-700" : ""}`}>
+                  <td className={`px-3 py-2 text-right font-medium ${displayPos === cheapestFeePos ? "text-green-700" : ""}`}>
                     {fmtDetailed(v.totalFee)}
                   </td>
-                  <td className={`px-3 py-2 text-right font-bold ${isCheapest ? "text-green-700" : ""}`}>
+                  <td className={`px-3 py-2 text-right font-bold ${isRef ? "text-amber-700" : isCheapest ? "text-green-700" : ""}`}>
                     {fmtDetailed(v.totalCombined)}
                   </td>
-                  <td className="px-3 py-2 text-right">
-                    {isCheapest ? (
-                      <span className="text-green-700 font-semibold">—</span>
-                    ) : (
-                      <span className="text-red-600 font-medium">
-                        +{fmtDetailed(diff)} ({diffPct.toFixed(1)}%)
-                      </span>
-                    )}
-                  </td>
+                  <td className="px-3 py-2 text-right">{diffCell}</td>
                   <td className="px-3 py-2 text-right text-[var(--slate-600)]">{v.itemCount}</td>
                 </tr>
               );
@@ -231,6 +287,7 @@ interface UnifiedSection {
   sectionName: string;
   depth: number;
   children: UnifiedSection[];
+  perVersionTotals: (SectionTotals | null)[];
 }
 
 function buildUnifiedSectionTree(versions: MultiVersionEntry[]): UnifiedSection[] {
@@ -255,11 +312,13 @@ function buildUnifiedSectionTree(versions: MultiVersionEntry[]): UnifiedSection[
     for (const [name, perVersion] of nameSet) {
       // Grab first available section code
       let code: string | null = null;
-      const childTotals: SectionTotals[][] = versions.map(() => []);
+      const childTotals: SectionTotals[][] = allTotals.map(() => []);
+      const pvTotals: (SectionTotals | null)[] = allTotals.map(() => null);
       for (let vi = 0; vi < perVersion.length; vi++) {
         for (const t of perVersion[vi]) {
           if (!code) code = t.sectionCode;
           childTotals[vi].push(...t.children);
+          if (!pvTotals[vi]) pvTotals[vi] = t;
         }
       }
       result.push({
@@ -267,6 +326,7 @@ function buildUnifiedSectionTree(versions: MultiVersionEntry[]): UnifiedSection[
         sectionName: name,
         depth,
         children: mergeLevel(childTotals, depth + 1),
+        perVersionTotals: pvTotals,
       });
     }
     return result;
@@ -278,36 +338,29 @@ function buildUnifiedSectionTree(versions: MultiVersionEntry[]): UnifiedSection[
   );
 }
 
-function findSectionTotals(
-  totals: SectionTotals[],
-  sectionName: string
-): SectionTotals | undefined {
-  for (const t of totals) {
-    if (t.sectionName === sectionName) return t;
-    const child = findSectionTotals(t.children, sectionName);
-    if (child) return child;
-  }
-  return undefined;
-}
+
 
 function SectionRow({
   section,
-  versions,
+  visibleEntries,
   cheapestMap,
   skipZero,
+  referenceVersionIdx,
 }: {
   section: UnifiedSection;
-  versions: MultiVersionEntry[];
+  visibleEntries: VersionEntry[];
   cheapestMap: Map<string, number>;
   skipZero: boolean;
+  referenceVersionIdx: number | null;
 }) {
+  void cheapestMap;
   const [collapsed, setCollapsed] = useState(false);
   const indent = section.depth * 16;
   const hasChildren = section.children.length > 0;
 
-  // Get totals for this section from each version
-  const sectionValues = versions.map((v) => {
-    const st = findSectionTotals(v.sectionTotals, section.sectionName);
+  // Get totals for this section from each version (embedded during tree build)
+  const sectionValues = visibleEntries.map((_, displayPos) => {
+    const st = section.perVersionTotals[displayPos];
     return {
       material: st?.materialTotal ?? 0,
       fee: st?.feeTotal ?? 0,
@@ -317,15 +370,19 @@ function SectionRow({
     };
   });
 
-  const combinedValues = sectionValues.map((sv) => sv.combined);
   // Only compare versions that actually have this section
-  // When skipZero=true, also exclude 0 values from cheapest detection
   const existingValues = sectionValues
     .map((sv, i) => ({ val: sv.combined, idx: i, exists: sv.exists }))
     .filter((x) => x.exists && (!skipZero || x.val !== 0));
-  const cheapestIdx = existingValues.length > 0
+  const cheapestDisplayPos = existingValues.length > 0
     ? existingValues.reduce((min, cur) => (cur.val < min.val ? cur : min)).idx
     : -1;
+
+  // Reference entry in visible list (display position)
+  const refDisplayPos = referenceVersionIdx !== null
+    ? visibleEntries.findIndex((x) => x.originalIdx === referenceVersionIdx)
+    : -1;
+  const refSv = refDisplayPos >= 0 ? sectionValues[refDisplayPos] : null;
 
   return (
     <>
@@ -350,23 +407,32 @@ function SectionRow({
             </span>
           </span>
         </td>
-        {versions.map((_, idx) => {
-          const sv = sectionValues[idx];
-          const isCheapest = idx === cheapestIdx && existingValues.length > 1;
+        {visibleEntries.map(({ originalIdx }, displayPos) => {
+          const sv = sectionValues[displayPos];
+          const isCheapest = displayPos === cheapestDisplayPos && existingValues.length > 1;
+          const isRef = originalIdx === referenceVersionIdx;
+          const delta = refSv && sv.exists && !isRef && refSv.exists ? sv.combined - refSv.combined : null;
+          const deltaPct = delta !== null && refSv && refSv.combined > 0 ? (delta / refSv.combined) * 100 : null;
           return (
             <td
-              key={idx}
-              className={`px-3 py-2 border-b border-amber-100 text-right ${isCheapest ? "bg-green-50" : ""}`}
+              key={originalIdx}
+              className={`px-3 py-2 border-b border-amber-100 text-right ${isRef ? "bg-amber-50/60" : isCheapest ? "bg-green-50" : ""}`}
             >
               {sv.exists ? (
                 <div>
-                  <div className={`text-xs font-semibold ${isCheapest ? "text-green-700" : "text-[var(--slate-800)]"}`}>
+                  <div className={`text-xs font-semibold ${isRef ? "text-amber-700" : isCheapest ? "text-green-700" : "text-[var(--slate-800)]"}`}>
                     {fmt(sv.combined)}
-                    {isCheapest && <Trophy size={8} className="inline ml-0.5 text-green-600" />}
+                    {isCheapest && !isRef && <Trophy size={8} className="inline ml-0.5 text-green-600" />}
+                    {isRef && <Pin size={8} className="inline ml-0.5 text-amber-500" />}
                   </div>
                   <div className="text-[10px] text-[var(--slate-400)]">
                     A: {fmt(sv.material)} | D: {fmt(sv.fee)}
                   </div>
+                  {delta !== null && deltaPct !== null && (
+                    <div className={`text-[9px] font-medium mt-0.5 ${delta > 0 ? "text-red-500" : delta < 0 ? "text-green-600" : "text-[var(--slate-400)]"}`}>
+                      {delta >= 0 ? "+" : ""}{fmt(delta)} ({delta >= 0 ? "+" : ""}{deltaPct.toFixed(1)}%)
+                    </div>
+                  )}
                 </div>
               ) : (
                 <span className="text-[10px] text-[var(--slate-300)]">—</span>
@@ -380,17 +446,32 @@ function SectionRow({
           <SectionRow
             key={child.sectionName}
             section={child}
-            versions={versions}
-            cheapestMap={cheapestMap}
+            visibleEntries={visibleEntries}
+            cheapestMap={new Map()}
             skipZero={skipZero}
+            referenceVersionIdx={referenceVersionIdx}
           />
         ))}
     </>
   );
 }
 
-function SectionsView({ result, skipZero, hiddenVersionIdxs }: { result: MultiComparisonResult; skipZero: boolean; hiddenVersionIdxs: Set<number> }) {
-  const versions = result.versions.filter((_, i) => !hiddenVersionIdxs.has(i));
+function SectionsView({
+  result,
+  skipZero,
+  hiddenVersionIdxs,
+  orderedVersions,
+  referenceVersionIdx,
+}: {
+  result: MultiComparisonResult;
+  skipZero: boolean;
+  hiddenVersionIdxs: Set<number>;
+  orderedVersions: VersionEntry[];
+  referenceVersionIdx: number | null;
+}) {
+  void result;
+  const visibleEntries = orderedVersions.filter((x) => !hiddenVersionIdxs.has(x.originalIdx));
+  const versions = visibleEntries.map((x) => x.version);
   const unifiedTree = useMemo(() => buildUnifiedSectionTree(versions), [versions]);
 
   // When skipZero, filter out sections where ALL versions have 0 total
@@ -404,8 +485,7 @@ function SectionsView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
         }))
         .filter((s) => {
           // Keep if at least one version has non-zero combined for this section
-          const hasNonZero = versions.some((v) => {
-            const st = findSectionTotals(v.sectionTotals, s.sectionName);
+          const hasNonZero = s.perVersionTotals.some((st) => {
             return st && (st.materialTotal + st.feeTotal) > 0;
           });
           // Also keep if it has children that survived filtering
@@ -413,7 +493,7 @@ function SectionsView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
         });
     }
     return filterSections(unifiedTree);
-  }, [unifiedTree, skipZero, versions]);
+  }, [unifiedTree, skipZero]);
 
   return (
     <div className="p-4">
@@ -425,17 +505,26 @@ function SectionsView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
                 <th className="text-left px-3 py-2 text-[var(--slate-500)] font-medium min-w-[200px] sticky left-0 bg-[var(--slate-50)] z-10">
                   Kategória
                 </th>
-                {versions.map((v, idx) => {
-                  const color = getColor(idx);
+                {visibleEntries.map(({ version: v, originalIdx }) => {
+                  const color = getColor(originalIdx);
+                  const isRef = originalIdx === referenceVersionIdx;
                   return (
                     <th
                       key={v.versionId}
-                      className={`text-right px-3 py-2 font-medium min-w-[140px] ${color.text} ${color.header}`}
+                      className={`text-right px-3 py-2 font-medium min-w-[140px] ${isRef ? "bg-amber-100 text-amber-800" : `${color.text} ${color.header}`}`}
                     >
-                      <div className="truncate">{v.versionName}</div>
-                      {v.partnerName && (
-                        <div className="text-[9px] font-normal opacity-70 truncate">{v.partnerName}</div>
-                      )}
+                      <div className="flex flex-col items-end gap-0.5">
+                        {isRef && (
+                          <span className="flex items-center gap-0.5 text-[9px] text-amber-600 font-bold">
+                            <Pin size={8} />
+                            REF
+                          </span>
+                        )}
+                        <div className="truncate">{v.versionName}</div>
+                        {v.partnerName && (
+                          <div className="text-[9px] font-normal opacity-70 truncate">{v.partnerName}</div>
+                        )}
+                      </div>
                     </th>
                   );
                 })}
@@ -446,35 +535,51 @@ function SectionsView({ result, skipZero, hiddenVersionIdxs }: { result: MultiCo
                 <SectionRow
                   key={section.sectionName}
                   section={section}
-                  versions={versions}
+                  visibleEntries={visibleEntries}
                   cheapestMap={new Map()}
                   skipZero={skipZero}
+                  referenceVersionIdx={referenceVersionIdx}
                 />
               ))}
               {/* Grand total row */}
-              <tr className="bg-[var(--slate-100)] font-bold border-t-2 border-[var(--slate-300)]">
-                <td className="px-3 py-2.5 text-[var(--slate-800)] sticky left-0 bg-[var(--slate-100)] z-10">
-                  Mindösszesen
-                </td>
-                {versions.map((v, idx) => {
-                  const cheapestIdx = findCheapestIdx(versions.map((x) => x.totalCombined), skipZero);
-                  const isCheapest = idx === cheapestIdx;
-                  return (
-                    <td
-                      key={v.versionId}
-                      className={`px-3 py-2.5 text-right ${isCheapest ? "bg-green-100" : ""}`}
-                    >
-                      <div className={`text-sm font-bold ${isCheapest ? "text-green-700" : "text-[var(--slate-800)]"}`}>
-                        {fmt(v.totalCombined)}
-                        {isCheapest && <Trophy size={10} className="inline ml-1 text-green-600" />}
-                      </div>
-                      <div className="text-[10px] text-[var(--slate-400)] font-normal">
-                        A: {fmt(v.totalMaterial)} | D: {fmt(v.totalFee)}
-                      </div>
+              {(() => {
+                const cheapestPos = findCheapestIdx(versions.map((x) => x.totalCombined), skipZero);
+                const refEntry = referenceVersionIdx !== null ? visibleEntries.find((x) => x.originalIdx === referenceVersionIdx) ?? null : null;
+                return (
+                  <tr className="bg-[var(--slate-100)] font-bold border-t-2 border-[var(--slate-300)]">
+                    <td className="px-3 py-2.5 text-[var(--slate-800)] sticky left-0 bg-[var(--slate-100)] z-10">
+                      Mindösszesen
                     </td>
-                  );
-                })}
-              </tr>
+                    {visibleEntries.map(({ version: v, originalIdx }, displayPos) => {
+                      const isCheapest = displayPos === cheapestPos;
+                      const isRef = originalIdx === referenceVersionIdx;
+                      const delta = refEntry && !isRef ? v.totalCombined - refEntry.version.totalCombined : null;
+                      const deltaPct = delta !== null && refEntry && refEntry.version.totalCombined > 0
+                        ? (delta / refEntry.version.totalCombined) * 100 : null;
+                      return (
+                        <td
+                          key={originalIdx}
+                          className={`px-3 py-2.5 text-right ${isRef ? "bg-amber-50" : isCheapest ? "bg-green-100" : ""}`}
+                        >
+                          <div className={`text-sm font-bold ${isRef ? "text-amber-700" : isCheapest ? "text-green-700" : "text-[var(--slate-800)]"}`}>
+                            {fmt(v.totalCombined)}
+                            {isCheapest && !isRef && <Trophy size={10} className="inline ml-1 text-green-600" />}
+                            {isRef && <Pin size={9} className="inline ml-1 text-amber-500" />}
+                          </div>
+                          <div className="text-[10px] text-[var(--slate-400)] font-normal">
+                            A: {fmt(v.totalMaterial)} | D: {fmt(v.totalFee)}
+                          </div>
+                          {delta !== null && deltaPct !== null && (
+                            <div className={`text-[9px] font-medium mt-0.5 ${delta > 0 ? "text-red-500" : delta < 0 ? "text-green-600" : "text-[var(--slate-400)]"}`}>
+                              {delta >= 0 ? "+" : ""}{fmt(delta)} ({delta >= 0 ? "+" : ""}{deltaPct.toFixed(1)}%)
+                            </div>
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })()}
             </tbody>
           </table>
         </div>
@@ -814,10 +919,14 @@ function VarianceView({
   result,
   skipZero,
   hiddenVersionIdxs,
+  orderedVersions,
+  referenceVersionIdx,
 }: {
   result: MultiComparisonResult;
   skipZero: boolean;
   hiddenVersionIdxs: Set<number>;
+  orderedVersions: VersionEntry[];
+  referenceVersionIdx: number | null;
 }) {
   const [mode, setMode] = useState<VarianceMode>("percentage");
   const [priceField, setPriceField] = useState<PriceField>("combined");
@@ -1156,20 +1265,22 @@ function VarianceView({
                   Me.
                 </th>
                 {/* Per-version unit price columns */}
-                {versions.map((v, idx) => {
-                  if (hiddenVersionIdxs.has(idx)) return null;
-                  const color = getColor(idx);
-                  const isSorted = sortByVersion?.idx === idx;
+                {orderedVersions.map(({ version: v, originalIdx }) => {
+                  if (hiddenVersionIdxs.has(originalIdx)) return null;
+                  const color = getColor(originalIdx);
+                  const isRef = originalIdx === referenceVersionIdx;
+                  const isSorted = sortByVersion?.idx === originalIdx;
                   return (
                     <th
                       key={v.versionId}
-                      className={`text-right px-3 py-2 font-medium min-w-[100px] ${color.text} ${color.header}`}
+                      className={`text-right px-3 py-2 font-medium min-w-[100px] ${isRef ? "bg-amber-100 text-amber-800" : `${color.text} ${color.header}`}`}
                     >
                       <button
-                        onClick={() => handleVersionHeaderClick(idx)}
+                        onClick={() => handleVersionHeaderClick(originalIdx)}
                         className="w-full text-right cursor-pointer hover:underline flex items-center justify-end gap-0.5"
                         title={isSorted ? (sortByVersion!.dir === "asc" ? "Legdrágább elöl (hol volt ez az alvállalkozó a legdrágább) — kattints a fordításhoz" : "Legolcsóbb elöl (hol volt ez az alvállalkozó a legolcsóbb) — kattints az alapértelmezetthez") : `Rendezés szórás szerint: ${v.partnerName ?? v.versionName}`}
                       >
+                        {isRef && <Pin size={8} className="shrink-0 text-amber-500" />}
                         <span className="truncate text-[10px]">{v.partnerName ?? v.versionName}</span>
                         {isSorted ? (
                           sortByVersion!.dir === "asc"
@@ -1196,7 +1307,7 @@ function VarianceView({
             <tbody>
               {sortedVariances.length === 0 && (
                 <tr>
-                  <td colSpan={6 + versions.length - hiddenVersionIdxs.size} className="px-3 py-8 text-center text-[var(--slate-400)]">
+                  <td colSpan={6 + orderedVersions.length - hiddenVersionIdxs.size} className="px-3 py-8 text-center text-[var(--slate-400)]">
                     Nincs a szűrési feltételeknek megfelelő tétel.
                   </td>
                 </tr>
@@ -1257,28 +1368,42 @@ function VarianceView({
                     <td className="px-3 py-2 text-center text-[var(--slate-500)]">
                       {v.item.unit}
                     </td>
-                    {displayPrices.map((price, idx) => {
-                      if (price === "hidden") return null;
+                    {orderedVersions.map(({ originalIdx }) => {
+                      const price = displayPrices[originalIdx];
+                      if (price === "hidden" || price === undefined) return null;
+                      const isRef = originalIdx === referenceVersionIdx;
                       if (price === null) {
                         return (
-                          <td key={idx} className="px-3 py-2 text-right text-[var(--slate-300)]">
+                          <td key={originalIdx} className={`px-3 py-2 text-right text-[var(--slate-300)] ${isRef ? "bg-amber-50/40" : ""}`}>
                             —
                           </td>
                         );
                       }
                       const isMin = price === minPrice && visibleDisplayPrices.length > 1;
                       const isMax = price === maxPrice && visibleDisplayPrices.length > 1;
+                      // Deviation from reference
+                      const refRawPrice = referenceVersionIdx !== null ? displayPrices[referenceVersionIdx] : null;
+                      const refPrice = typeof refRawPrice === "number" ? refRawPrice : null;
+                      const refDiff = !isRef && refPrice !== null ? price - refPrice : null;
+                      const refDiffPct = refDiff !== null && refPrice !== null && refPrice > 0
+                        ? (refDiff / refPrice) * 100 : null;
                       return (
-                        <td key={idx} className="px-3 py-2 text-right">
+                        <td key={originalIdx} className={`px-3 py-2 text-right ${isRef ? "bg-amber-50/40" : ""}`}>
                           <span
                             className={`font-medium ${
-                              isMin ? "text-green-700" : isMax ? "text-red-700" : "text-[var(--slate-700)]"
+                              isRef ? "text-amber-700" : isMin ? "text-green-700" : isMax ? "text-red-700" : "text-[var(--slate-700)]"
                             }`}
                           >
                             {mode === "total" ? fmt(price) : fmtDetailed(price)}
                           </span>
-                          {isMin && <span className="ml-0.5 text-[9px] text-green-600">▼</span>}
-                          {isMax && <span className="ml-0.5 text-[9px] text-red-600">▲</span>}
+                          {isRef && <span className="ml-0.5 text-[9px] text-amber-500">◆</span>}
+                          {!isRef && isMin && <span className="ml-0.5 text-[9px] text-green-600">▼</span>}
+                          {!isRef && isMax && <span className="ml-0.5 text-[9px] text-red-600">▲</span>}
+                          {refDiff !== null && refDiffPct !== null && (
+                            <div className={`text-[9px] leading-tight ${refDiff > 0 ? "text-red-500" : refDiff < 0 ? "text-green-600" : "text-[var(--slate-400)]"}`}>
+                              {refDiff >= 0 ? "+" : ""}{refDiffPct.toFixed(1)}%
+                            </div>
+                          )}
                         </td>
                       );
                     })}
@@ -1328,12 +1453,21 @@ export function MultiVersionComparison({
   versionNames,
   onBack,
 }: MultiVersionComparisonProps) {
+  void versionNames;
   const [result, setResult] = useState<MultiComparisonResult | null>(null);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<ViewMode>("overview");
   const [skipZero, setSkipZero] = useState(false);
-  // Version indices hidden from ALL comparison views
+  // Version indices hidden from ALL comparison views (uses originalIdx)
   const [hiddenVersionIdxs, setHiddenVersionIdxs] = useState<Set<number>>(new Set());
+  // Display order (array of originalIdx values)
+  const [versionOrder, setVersionOrder] = useState<number[]>([]);
+  // Reference version (originalIdx), null = none
+  const [referenceVersionIdx, setReferenceVersionIdx] = useState<number | null>(null);
+  // DnD state
+  const dragSourceRef = useRef<number | null>(null);
+  const [dragOverSeq, setDragOverSeq] = useState<number | null>(null);
+  const [dragOverRef, setDragOverRef] = useState(false);
 
   const toggleVersionHide = useCallback((idx: number) => {
     setHiddenVersionIdxs((prev) => {
@@ -1344,10 +1478,53 @@ export function MultiVersionComparison({
     });
   }, []);
 
+  const handleDragStart = useCallback((e: React.DragEvent, originalIdx: number) => {
+    dragSourceRef.current = originalIdx;
+    e.dataTransfer.effectAllowed = "move";
+  }, []);
+
+  const handleDropOnPill = useCallback((e: React.DragEvent, targetOriginalIdx: number) => {
+    e.preventDefault();
+    const src = dragSourceRef.current;
+    if (src === null || src === targetOriginalIdx) {
+      dragSourceRef.current = null;
+      setDragOverSeq(null);
+      return;
+    }
+    setVersionOrder((prev) => {
+      const next = [...prev];
+      const fromPos = next.indexOf(src);
+      const toPos = next.indexOf(targetOriginalIdx);
+      next.splice(fromPos, 1);
+      next.splice(toPos, 0, src);
+      return next;
+    });
+    dragSourceRef.current = null;
+    setDragOverSeq(null);
+  }, []);
+
+  const handleDropOnReference = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const src = dragSourceRef.current;
+    if (src !== null) {
+      setReferenceVersionIdx((prev) => (prev === src ? null : src));
+    }
+    dragSourceRef.current = null;
+    setDragOverRef(false);
+  }, []);
+
+  // Ordered version entries derived from versionOrder
+  const orderedVersions = useMemo<VersionEntry[]>(
+    () => (result && versionOrder.length > 0 ? versionOrder.map((i) => ({ version: result.versions[i], originalIdx: i })) : []),
+    [result, versionOrder],
+  );
+
   useEffect(() => {
     setLoading(true);
     compareMultipleVersions(versionIds).then((data) => {
       setResult(data);
+      setVersionOrder(data.versions.map((_, i) => i));
+      setReferenceVersionIdx(null);
       setLoading(false);
     });
   }, [versionIds]);
@@ -1371,30 +1548,87 @@ export function MultiVersionComparison({
           Összehasonlítás ({result.versions.length} verzió)
         </span>
         <div className="flex items-center gap-1 ml-2 flex-wrap">
-          {result.versions.map((v, idx) => {
-            const color = getColor(idx);
-            const isHidden = hiddenVersionIdxs.has(idx);
+          {/* Reference drop slot */}
+          <div
+            className={`inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full border-2 border-dashed transition-all cursor-default ${
+              dragOverRef
+                ? "border-amber-400 bg-amber-100 text-amber-700 scale-105"
+                : referenceVersionIdx !== null
+                ? "border-amber-400 bg-amber-50 text-amber-700"
+                : "border-[var(--slate-300)] text-[var(--slate-400)] hover:border-amber-300 hover:text-amber-500"
+            }`}
+            onDragOver={(e) => { e.preventDefault(); setDragOverRef(true); }}
+            onDragLeave={() => setDragOverRef(false)}
+            onDrop={handleDropOnReference}
+            title="Húzzon ide egy verziót referenciának, vagy kattintson a gombostű ikonra"
+          >
+            <Pin size={9} className="shrink-0" />
+            {referenceVersionIdx !== null ? (
+              <>
+                <span className="max-w-[120px] truncate">{result.versions[referenceVersionIdx].versionName}</span>
+                <button
+                  className="ml-0.5 hover:text-red-500 cursor-pointer leading-none"
+                  onClick={() => setReferenceVersionIdx(null)}
+                  title="Referencia törlése"
+                >
+                  <X size={9} />
+                </button>
+              </>
+            ) : (
+              <span>Referencia</span>
+            )}
+          </div>
+          {/* Version pills — draggable + pin + hide */}
+          {orderedVersions.map(({ version: v, originalIdx }) => {
+            const color = getColor(originalIdx);
+            const isHidden = hiddenVersionIdxs.has(originalIdx);
+            const isRef = originalIdx === referenceVersionIdx;
+            const isDragOver = dragOverSeq === originalIdx;
             return (
-              <button
+              <div
                 key={v.versionId}
-                onClick={() => toggleVersionHide(idx)}
-                title={isHidden ? "Kattints a visszavételhez" : "Kattints a kizáráshoz"}
-                className={`group/note relative inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-medium rounded-full border cursor-pointer transition-all select-none ${
+                draggable
+                onDragStart={(e) => handleDragStart(e, originalIdx)}
+                onDragOver={(e) => { e.preventDefault(); setDragOverSeq(originalIdx); }}
+                onDragLeave={() => setDragOverSeq(null)}
+                onDrop={(e) => handleDropOnPill(e, originalIdx)}
+                onDragEnd={() => { setDragOverSeq(null); setDragOverRef(false); dragSourceRef.current = null; }}
+                onClick={() => toggleVersionHide(originalIdx)}
+                className={`group/pill relative inline-flex items-center gap-0.5 pl-1 pr-1.5 py-0.5 text-[10px] font-medium rounded-full border cursor-grab active:cursor-grabbing transition-all select-none ${
+                  isDragOver ? "ring-2 ring-[var(--indigo-400)] scale-105" : ""
+                } ${
                   isHidden
                     ? "opacity-35 grayscale bg-[var(--slate-100)] text-[var(--slate-400)] border-[var(--slate-200)] line-through"
+                    : isRef
+                    ? "bg-amber-50 text-amber-700 border-amber-400 ring-1 ring-amber-300"
                     : `${color.bg} ${color.text} ${color.border} hover:opacity-80`
                 }`}
+                title={isHidden ? "Kattints a visszavételhez" : "Kattints a kizáráshoz / húzd a sorrendezéshez"}
               >
+                <GripVertical size={9} className="text-[var(--slate-300)] shrink-0" />
                 {v.versionName}
                 {!isHidden && v.notes && (
                   <>
-                    <MessageSquare size={9} className="text-[var(--amber-500)]" />
-                    <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 hidden group-hover/note:block z-50 w-max max-w-[260px] px-2.5 py-1.5 rounded-md bg-[var(--slate-800)] text-[10px] text-white shadow-lg whitespace-pre-wrap pointer-events-none font-normal">
+                    <MessageSquare size={9} className="text-[var(--amber-500)] shrink-0" />
+                    <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1.5 hidden group-hover/pill:block z-50 w-max max-w-[260px] px-2.5 py-1.5 rounded-md bg-[var(--slate-800)] text-[10px] text-white shadow-lg whitespace-pre-wrap pointer-events-none font-normal">
                       {v.notes}
                     </span>
                   </>
                 )}
-              </button>
+                {/* Pin/unpin reference */}
+                {!isHidden && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setReferenceVersionIdx((prev) => (prev === originalIdx ? null : originalIdx));
+                    }}
+                    className={`shrink-0 cursor-pointer transition-opacity ${isRef ? "opacity-100 text-amber-500" : "opacity-0 group-hover/pill:opacity-40 hover:!opacity-100"}`}
+                    title={isRef ? "Referencia megszüntetése" : "Beállítás referenciának"}
+                  >
+                    <Pin size={8} />
+                  </button>
+                )}
+              </div>
             );
           })}
         </div>
@@ -1450,9 +1684,9 @@ export function MultiVersionComparison({
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto bg-[var(--slate-50)]">
-        {viewMode === "overview" && <OverviewView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} />}
-        {viewMode === "sections" && <SectionsView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} />}
-        {viewMode === "variance" && <VarianceView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} />}
+        {viewMode === "overview" && <OverviewView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} orderedVersions={orderedVersions} referenceVersionIdx={referenceVersionIdx} />}
+        {viewMode === "sections" && <SectionsView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} orderedVersions={orderedVersions} referenceVersionIdx={referenceVersionIdx} />}
+        {viewMode === "variance" && <VarianceView result={result} skipZero={skipZero} hiddenVersionIdxs={hiddenVersionIdxs} orderedVersions={orderedVersions} referenceVersionIdx={referenceVersionIdx} />}
       </div>
     </div>
   );
