@@ -10,6 +10,9 @@ import { QuoteForm } from "@/components/modules/quotes/QuoteForm";
 import { BudgetsList } from "@/components/modules/budgets/BudgetsList";
 import { BudgetForm } from "@/components/modules/budgets/BudgetForm";
 import { BudgetDetail } from "@/components/modules/budgets/BudgetDetail";
+import { MultiVersionComparison } from "@/components/modules/budgets/MultiVersionComparison";
+import { VersionComparison } from "@/components/modules/budgets/VersionComparison";
+import { type CompareType, type SimpleCompareState, type MultiCompareState } from "@/server/actions/comparisons";
 import { AiAssistant } from "@/components/modules/ai-assistant/AiAssistant";
 import { ReportsDashboard } from "@/components/modules/reports/ReportsDashboard";
 import { ScenariosList } from "@/components/modules/scenarios/ScenariosList";
@@ -98,6 +101,39 @@ export function TabContent() {
           readOnly={activeTab.tabType === "view"}
         />
       );
+    case "budgets-comparison": {
+      const vIds = params.versionIds as number[];
+      const vNames = params.versionNames as string[];
+      const bId = resolveId("budgetId") as number;
+      const cType = (params.compareType as CompareType) ?? "multi";
+      const savedState = params.state as SimpleCompareState | MultiCompareState | undefined;
+      const onTabBack = () => {
+        const { closeTab } = useTabStore.getState();
+        closeTab(activeTab.id);
+      };
+      if (cType === "simple" && vIds.length === 2) {
+        return (
+          <VersionComparison
+            versionAId={vIds[0]}
+            versionBId={vIds[1]}
+            nameA={vNames[0]}
+            nameB={vNames[1]}
+            budgetId={bId}
+            initialState={savedState as SimpleCompareState | undefined}
+            onBack={onTabBack}
+          />
+        );
+      }
+      return (
+        <MultiVersionComparison
+          versionIds={vIds}
+          versionNames={vNames}
+          budgetId={bId}
+          initialState={savedState as MultiCompareState | undefined}
+          onBack={onTabBack}
+        />
+      );
+    }
     case "reports":
       return <ReportsDashboard />;
     case "settlements":

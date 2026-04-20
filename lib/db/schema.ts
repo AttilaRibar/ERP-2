@@ -145,6 +145,7 @@ export const budgetsRelations = relations(budgets, ({ one, many }) => ({
     references: [projects.id],
   }),
   versions: many(versions),
+  savedComparisons: many(savedComparisons),
 }));
 
 // ============================================================
@@ -443,5 +444,33 @@ export const settlementItemsRelations = relations(settlementItems, ({ one }) => 
   invoice: one(settlementInvoices, {
     fields: [settlementItems.invoiceId],
     references: [settlementInvoices.id],
+  }),
+}));
+
+// ============================================================
+// 13. SAVED COMPARISONS (Mentett összehasonlítások)
+// ============================================================
+export const savedComparisons = pgTable(
+  "saved_comparisons",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    budgetId: bigint("budget_id", { mode: "number" })
+      .notNull()
+      .references(() => budgets.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    versionIds: text("version_ids").notNull(),
+    versionNames: text("version_names").notNull(),
+    compareType: text("compare_type").notNull().default("multi"), // 'simple' | 'multi'
+    state: text("state").notNull().default("{}"), // JSON blob with full UI state
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [index("idx_saved_comparisons_budget").on(t.budgetId)]
+);
+
+export const savedComparisonsRelations = relations(savedComparisons, ({ one }) => ({
+  budget: one(budgets, {
+    fields: [savedComparisons.budgetId],
+    references: [budgets.id],
   }),
 }));

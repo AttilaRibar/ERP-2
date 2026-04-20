@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, ArrowLeftRight, Plus, Minus, RefreshCw, MoveRight, Layers, ChevronDown, ChevronRight, Eye, EyeOff, MessageSquare } from "lucide-react";
+import { ArrowLeft, ArrowLeftRight, Plus, Minus, RefreshCw, MoveRight, Layers, ChevronDown, ChevronRight, Eye, EyeOff, MessageSquare, Save, X } from "lucide-react";
 import {
   compareVersions,
   type ComparisonResult,
@@ -11,6 +11,7 @@ import {
   type ReconstructedItem,
   type ReconstructedSection,
 } from "@/server/actions/versions";
+import { createSavedComparison, type SimpleCompareState } from "@/server/actions/comparisons";
 
 interface VersionComparisonProps {
   versionAId: number;
@@ -18,6 +19,8 @@ interface VersionComparisonProps {
   nameA: string;
   nameB: string;
   onBack: () => void;
+  budgetId?: number;
+  initialState?: SimpleCompareState;
 }
 
 function fmt(n: number): string {
@@ -410,13 +413,18 @@ export function VersionComparison({
   nameA,
   nameB,
   onBack,
+  budgetId,
+  initialState,
 }: VersionComparisonProps) {
-  const [swapped, setSwapped] = useState(false);
+  const [swapped, setSwapped] = useState(initialState?.swapped ?? false);
   const [result, setResult] = useState<ComparisonResult | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showUnchanged, setShowUnchanged] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>("items");
-  const [showQtyChange, setShowQtyChange] = useState(false);
+  const [showUnchanged, setShowUnchanged] = useState(initialState?.showUnchanged ?? false);
+  const [viewMode, setViewMode] = useState<ViewMode>(initialState?.viewMode ?? "items");
+  const [showQtyChange, setShowQtyChange] = useState(initialState?.showQtyChange ?? false);
+  const [saveName, setSaveName] = useState("");
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // Direction-aware IDs and labels
   const effectiveAId   = swapped ? versionBId : versionAId;
@@ -524,6 +532,68 @@ export function VersionComparison({
           <ArrowLeftRight size={12} />
           Irány váltása
         </button>
+        {/* Save comparison */}
+        {budgetId && (
+          <div className="relative">
+            {showSaveDialog ? (
+              <div className="flex items-center gap-1">
+                <input
+                  autoFocus
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && saveName.trim()) {
+                      setSaving(true);
+                      const state: SimpleCompareState = { swapped, showUnchanged, viewMode, showQtyChange };
+                      createSavedComparison(budgetId, saveName.trim(), [versionAId, versionBId], [nameA, nameB], "simple", state).then(() => {
+                        setSaving(false);
+                        setShowSaveDialog(false);
+                        setSaveName("");
+                      });
+                    }
+                    if (e.key === "Escape") setShowSaveDialog(false);
+                  }}
+                  placeholder="Összehasonlítás neve…"
+                  className="text-xs border border-[var(--indigo-300)] rounded px-2 py-[3px] w-48 focus:outline-none focus:ring-1 focus:ring-[var(--indigo-400)]"
+                />
+                <button
+                  disabled={!saveName.trim() || saving}
+                  onClick={() => {
+                    if (!saveName.trim()) return;
+                    setSaving(true);
+                    const state: SimpleCompareState = { swapped, showUnchanged, viewMode, showQtyChange };
+                    createSavedComparison(budgetId, saveName.trim(), [versionAId, versionBId], [nameA, nameB], "simple", state).then(() => {
+                      setSaving(false);
+                      setShowSaveDialog(false);
+                      setSaveName("");
+                    });
+                  }}
+                  className="px-2 py-[3px] rounded text-xs bg-[var(--indigo-600)] text-white hover:bg-[var(--indigo-700)] cursor-pointer transition-colors disabled:opacity-40"
+                >
+                  {saving ? "…" : "Mentés"}
+                </button>
+                <button
+                  onClick={() => setShowSaveDialog(false)}
+                  className="px-1.5 py-[3px] rounded text-xs text-[var(--slate-400)] hover:bg-[var(--slate-100)] cursor-pointer"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  setSaveName(`${effectiveNameA} → ${effectiveNameB}`);
+                  setShowSaveDialog(true);
+                }}
+                className="flex items-center gap-1 px-2.5 py-[4px] text-xs border border-[var(--slate-200)] rounded-[6px] text-[var(--slate-600)] hover:bg-[var(--indigo-50)] hover:text-[var(--indigo-600)] hover:border-[var(--indigo-200)] cursor-pointer transition-colors"
+                title="Összehasonlítás mentése"
+              >
+                <Save size={12} />
+                Mentés
+              </button>
+            )}
+          </div>
+        )}
         {/* View mode toggle */}
         <div className="flex rounded-[6px] border border-[var(--slate-200)] overflow-hidden ml-2">
           <button

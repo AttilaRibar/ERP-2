@@ -17,6 +17,8 @@ import {
   MessageSquare,
   MoreVertical,
   CheckSquare,
+  ArrowLeftRight,
+  Layers,
 } from "lucide-react";
 import {
   getVersionsByBudgetId,
@@ -145,6 +147,7 @@ export function VersionGraph({
   const [editingNotesId, setEditingNotesId] = useState<number | null>(null);
   const [notesValue, setNotesValue] = useState("");
   const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+  const [showCompareChoice, setShowCompareChoice] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputVersionRef = useRef<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -270,16 +273,31 @@ export function VersionGraph({
 
   const handleCompare = () => {
     if (compareSet.length === 2) {
-      const a = versionsList.find((v) => v.id === compareSet[0]);
-      const b = versionsList.find((v) => v.id === compareSet[1]);
-      if (a && b) {
-        onCompare(a.id, b.id, a.versionName, b.versionName);
-      }
+      // Show choice: simple or multi
+      setShowCompareChoice(true);
     } else if (compareSet.length >= 3 && onMultiCompare) {
       const ids = compareSet;
       const names = ids.map((id) => versionsList.find((v) => v.id === id)?.versionName ?? `#${id}`);
       onMultiCompare(ids, names);
     }
+  };
+
+  const handleCompareSimple = () => {
+    const a = versionsList.find((v) => v.id === compareSet[0]);
+    const b = versionsList.find((v) => v.id === compareSet[1]);
+    if (a && b) {
+      onCompare(a.id, b.id, a.versionName, b.versionName);
+    }
+    setShowCompareChoice(false);
+  };
+
+  const handleCompareMulti = () => {
+    if (onMultiCompare) {
+      const ids = compareSet;
+      const names = ids.map((id) => versionsList.find((v) => v.id === id)?.versionName ?? `#${id}`);
+      onMultiCompare(ids, names);
+    }
+    setShowCompareChoice(false);
   };
 
   if (loading) {
@@ -313,19 +331,40 @@ export function VersionGraph({
               onClick={() => {
                 setCompareMode(false);
                 setCompareSet([]);
+                setShowCompareChoice(false);
               }}
               className="px-3 py-[5px] rounded-[6px] text-xs border border-[var(--slate-200)] text-[var(--slate-500)] hover:bg-[var(--slate-50)] cursor-pointer transition-colors"
             >
               Mégse
             </button>
-            <button
-              onClick={handleCompare}
-              disabled={compareSet.length < 2}
-              className="flex items-center gap-1.5 px-3 py-[5px] rounded-[6px] text-xs bg-[var(--indigo-600)] text-white hover:bg-[var(--indigo-700)] cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              <GitCompareArrows size={12} />
-              Összehasonlítás{compareSet.length >= 2 ? ` (${compareSet.length})` : ""}
-            </button>
+            {showCompareChoice ? (
+              <div className="flex items-center gap-1.5">
+                <span className="text-[10px] text-[var(--slate-500)]">Mód:</span>
+                <button
+                  onClick={handleCompareSimple}
+                  className="flex items-center gap-1 px-3 py-[5px] rounded-[6px] text-xs bg-blue-600 text-white hover:bg-blue-700 cursor-pointer transition-colors"
+                >
+                  <ArrowLeftRight size={12} />
+                  Egyszerű
+                </button>
+                <button
+                  onClick={handleCompareMulti}
+                  className="flex items-center gap-1 px-3 py-[5px] rounded-[6px] text-xs bg-[var(--indigo-600)] text-white hover:bg-[var(--indigo-700)] cursor-pointer transition-colors"
+                >
+                  <Layers size={12} />
+                  Többes
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={handleCompare}
+                disabled={compareSet.length < 2}
+                className="flex items-center gap-1.5 px-3 py-[5px] rounded-[6px] text-xs bg-[var(--indigo-600)] text-white hover:bg-[var(--indigo-700)] cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                <GitCompareArrows size={12} />
+                Összehasonlítás{compareSet.length >= 2 ? ` (${compareSet.length})` : ""}
+              </button>
+            )}
           </>
         ) : (
           <>

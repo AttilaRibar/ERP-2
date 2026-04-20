@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, Trophy, ChevronDown, ChevronRight, ChevronUp, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff, X, GripVertical, Pin } from "lucide-react";
+import { ArrowLeft, Trophy, ChevronDown, ChevronRight, ChevronUp, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff, X, GripVertical, Pin, Save } from "lucide-react";
 import {
   compareMultipleVersions,
   type MultiComparisonResult,
@@ -10,11 +10,14 @@ import {
   type MultiVersionItemEntry,
   type SectionTotals,
 } from "@/server/actions/versions";
+import { createSavedComparison, type MultiCompareState } from "@/server/actions/comparisons";
 
 interface MultiVersionComparisonProps {
   versionIds: number[];
   versionNames: string[];
   onBack: () => void;
+  budgetId?: number;
+  initialState?: MultiCompareState;
 }
 
 function fmt(n: number): string {
@@ -935,6 +938,8 @@ function VarianceView({
   const [showAll, setShowAll] = useState(false);
   // Sort by a specific version column: null = sort by spread (default)
   const [sortByVersion, setSortByVersion] = useState<{ idx: number; dir: "asc" | "desc" } | null>(null);
+  // Checked rows (by itemCode)
+  const [checkedItems, setCheckedItems] = useState<Set<string>>(new Set());
   // Tooltip state
   const [tooltip, setTooltip] = useState<ItemTooltipState | null>(null);
   const tooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1249,7 +1254,25 @@ function VarianceView({
           <table className="w-full text-xs border-collapse">
             <thead>
               <tr className="bg-[var(--slate-50)]">
-                <th className="text-left px-3 py-2 text-[var(--slate-500)] font-medium sticky left-0 bg-[var(--slate-50)] z-10 min-w-[60px]">
+                <th className="text-center px-1 py-2 text-[var(--slate-500)] font-medium sticky left-0 bg-[var(--slate-50)] z-10 w-[32px]">
+                  <input
+                    type="checkbox"
+                    checked={sortedVariances.length > 0 && sortedVariances.every((v) => checkedItems.has(v.item.itemCode))}
+                    onChange={(e) => {
+                      setCheckedItems((prev) => {
+                        const next = new Set(prev);
+                        if (e.target.checked) {
+                          sortedVariances.forEach((v) => next.add(v.item.itemCode));
+                        } else {
+                          sortedVariances.forEach((v) => next.delete(v.item.itemCode));
+                        }
+                        return next;
+                      });
+                    }}
+                    className="rounded border-[var(--slate-300)] cursor-pointer"
+                  />
+                </th>
+                <th className="text-left px-3 py-2 text-[var(--slate-500)] font-medium min-w-[60px]">
                   #
                 </th>
                 <th className="text-left px-3 py-2 text-[var(--slate-500)] font-medium min-w-[50px]">
@@ -1307,7 +1330,7 @@ function VarianceView({
             <tbody>
               {sortedVariances.length === 0 && (
                 <tr>
-                  <td colSpan={6 + orderedVersions.length - hiddenVersionIdxs.size} className="px-3 py-8 text-center text-[var(--slate-400)]">
+                  <td colSpan={7 + orderedVersions.length - hiddenVersionIdxs.size} className="px-3 py-8 text-center text-[var(--slate-400)]">
                     Nincs a szűrési feltételeknek megfelelő tétel.
                   </td>
                 </tr>
@@ -1342,7 +1365,22 @@ function VarianceView({
                       spreadPct >= 100 ? "bg-red-50/50" : spreadPct >= 50 ? "bg-orange-50/30" : ""
                     }`}
                   >
-                    <td className="px-3 py-2 text-[var(--slate-400)] sticky left-0 bg-inherit z-10">
+                    <td className="px-1 py-2 text-center sticky left-0 bg-inherit z-10">
+                      <input
+                        type="checkbox"
+                        checked={checkedItems.has(v.item.itemCode)}
+                        onChange={() => {
+                          setCheckedItems((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(v.item.itemCode)) next.delete(v.item.itemCode);
+                            else next.add(v.item.itemCode);
+                            return next;
+                          });
+                        }}
+                        className="rounded border-[var(--slate-300)] cursor-pointer"
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-[var(--slate-400)]">
                       {rowIdx + 1}
                     </td>
                     <td className="px-3 py-2 font-mono text-[10px] text-[var(--slate-500)]">
@@ -1452,18 +1490,27 @@ export function MultiVersionComparison({
   versionIds,
   versionNames,
   onBack,
+  budgetId,
+  initialState,
 }: MultiVersionComparisonProps) {
   void versionNames;
   const [result, setResult] = useState<MultiComparisonResult | null>(null);
   const [loading, setLoading] = useState(true);
-  const [viewMode, setViewMode] = useState<ViewMode>("overview");
-  const [skipZero, setSkipZero] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>(initialState?.viewMode ?? "overview");
+  const [skipZero, setSkipZero] = useState(initialState?.skipZero ?? false);
+  const [saveName, setSaveName] = useState("");
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saving, setSaving] = useState(false);
   // Version indices hidden from ALL comparison views (uses originalIdx)
-  const [hiddenVersionIdxs, setHiddenVersionIdxs] = useState<Set<number>>(new Set());
+  const [hiddenVersionIdxs, setHiddenVersionIdxs] = useState<Set<number>>(
+    new Set(initialState?.hiddenVersionIdxs ?? [])
+  );
   // Display order (array of originalIdx values)
-  const [versionOrder, setVersionOrder] = useState<number[]>([]);
+  const [versionOrder, setVersionOrder] = useState<number[]>(initialState?.versionOrder ?? []);
   // Reference version (originalIdx), null = none
-  const [referenceVersionIdx, setReferenceVersionIdx] = useState<number | null>(null);
+  const [referenceVersionIdx, setReferenceVersionIdx] = useState<number | null>(
+    initialState?.referenceVersionIdx ?? null
+  );
   // DnD state
   const dragSourceRef = useRef<number | null>(null);
   const [dragOverSeq, setDragOverSeq] = useState<number | null>(null);
@@ -1523,11 +1570,16 @@ export function MultiVersionComparison({
     setLoading(true);
     compareMultipleVersions(versionIds).then((data) => {
       setResult(data);
-      setVersionOrder(data.versions.map((_, i) => i));
-      setReferenceVersionIdx(null);
+      // Only reset order/reference if no saved state was provided
+      if (!initialState?.versionOrder?.length) {
+        setVersionOrder(data.versions.map((_, i) => i));
+      }
+      if (initialState?.referenceVersionIdx === undefined) {
+        setReferenceVersionIdx(null);
+      }
       setLoading(false);
     });
-  }, [versionIds]);
+  }, [versionIds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading || !result) {
     return (
@@ -1644,6 +1696,83 @@ export function MultiVersionComparison({
           <EyeOff size={12} />
           0 Ft kihagyása
         </label>
+        {/* Save comparison */}
+        {budgetId && (
+          <div className="relative mr-2">
+            {showSaveDialog ? (
+              <div className="flex items-center gap-1">
+                <input
+                  autoFocus
+                  value={saveName}
+                  onChange={(e) => setSaveName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && saveName.trim()) {
+                      setSaving(true);
+                      const names = result!.versions.map((v) => v.versionName);
+                      const state: MultiCompareState = {
+                        viewMode,
+                        skipZero,
+                        hiddenVersionIdxs: Array.from(hiddenVersionIdxs),
+                        versionOrder,
+                        referenceVersionIdx,
+                      };
+                      createSavedComparison(budgetId, saveName.trim(), versionIds, names, "multi", state).then(() => {
+                        setSaving(false);
+                        setShowSaveDialog(false);
+                        setSaveName("");
+                      });
+                    }
+                    if (e.key === "Escape") setShowSaveDialog(false);
+                  }}
+                  placeholder="Összehasonlítás neve…"
+                  className="text-xs border border-[var(--indigo-300)] rounded px-2 py-[3px] w-48 focus:outline-none focus:ring-1 focus:ring-[var(--indigo-400)]"
+                />
+                <button
+                  disabled={!saveName.trim() || saving}
+                  onClick={() => {
+                    if (!saveName.trim()) return;
+                    setSaving(true);
+                    const names = result!.versions.map((v) => v.versionName);
+                    const state: MultiCompareState = {
+                      viewMode,
+                      skipZero,
+                      hiddenVersionIdxs: Array.from(hiddenVersionIdxs),
+                      versionOrder,
+                      referenceVersionIdx,
+                    };
+                    createSavedComparison(budgetId, saveName.trim(), versionIds, names, "multi", state).then(() => {
+                      setSaving(false);
+                      setShowSaveDialog(false);
+                      setSaveName("");
+                    });
+                  }}
+                  className="px-2 py-[3px] rounded text-xs bg-[var(--indigo-600)] text-white hover:bg-[var(--indigo-700)] cursor-pointer transition-colors disabled:opacity-40"
+                >
+                  {saving ? "…" : "Mentés"}
+                </button>
+                <button
+                  onClick={() => setShowSaveDialog(false)}
+                  className="px-1.5 py-[3px] rounded text-xs text-[var(--slate-400)] hover:bg-[var(--slate-100)] cursor-pointer"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => {
+                  const defaultName = result!.versions.map((v) => v.versionName).join(" vs ");
+                  setSaveName(defaultName);
+                  setShowSaveDialog(true);
+                }}
+                className="flex items-center gap-1 px-2.5 py-[4px] text-xs border border-[var(--slate-200)] rounded-[6px] text-[var(--slate-600)] hover:bg-[var(--indigo-50)] hover:text-[var(--indigo-600)] hover:border-[var(--indigo-200)] cursor-pointer transition-colors"
+                title="Összehasonlítás mentése"
+              >
+                <Save size={12} />
+                Mentés
+              </button>
+            )}
+          </div>
+        )}
         {/* View mode toggle */}
         <div className="flex items-center border border-[var(--slate-200)] rounded-[6px] overflow-hidden">
           <button

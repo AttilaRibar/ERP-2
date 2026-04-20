@@ -24,6 +24,10 @@ import {
   Eye,
   EyeOff,
   MessageSquare,
+  CheckSquare,
+  Square,
+  MinusSquare,
+  Calculator,
 } from "lucide-react";
 import {
   getVersionItems,
@@ -203,6 +207,10 @@ export function BudgetItemsPanel({
   const [expandedAlts, setExpandedAlts] = useState<Set<string>>(new Set());
   const [hoveredAltBadge, setHoveredAltBadge] = useState<string | null>(null);
   const [versionNotes, setVersionNotes] = useState<string | null>(null);
+  const [selMatItems, setSelMatItems] = useState<Set<string>>(new Set());
+  const [selFeeItems, setSelFeeItems] = useState<Set<string>>(new Set());
+  const [selMatSections, setSelMatSections] = useState<Set<string>>(new Set());
+  const [selFeeSections, setSelFeeSections] = useState<Set<string>>(new Set());
 
   const [addForm, setAddForm] = useState({
     itemNumber: "",
@@ -338,6 +346,97 @@ export function BudgetItemsPanel({
     () => workingItems.reduce((sum, i) => sum + i.quantity * i.feeUnitPrice, 0),
     [workingItems]
   );
+  const grandTotal = materialTotal + feeTotal;
+
+  // --- Selection helpers ---
+  const hasSelection = selMatItems.size > 0 || selFeeItems.size > 0;
+
+  /** All item codes belonging to a section (recursively including child sections) */
+  const getItemCodesForSection = useCallback((sectionCode: string): string[] => {
+    const direct = workingItems.filter((i) => i.sectionCode === sectionCode).map((i) => i.itemCode);
+    const childSections = workingSections.filter((s) => s.parentSectionCode === sectionCode);
+    return [...direct, ...childSections.flatMap((c) => getItemCodesForSection(c.sectionCode))];
+  }, [workingItems, workingSections]);
+
+  /** All descendant section codes (recursive) */
+  const getDescendantSectionCodes = useCallback((sectionCode: string): string[] => {
+    const children = workingSections.filter((s) => s.parentSectionCode === sectionCode);
+    return children.flatMap((c) => [c.sectionCode, ...getDescendantSectionCodes(c.sectionCode)]);
+  }, [workingSections]);
+
+  type SelChannel = "mat" | "fee";
+  const selItemsFor = (ch: SelChannel) => ch === "mat" ? selMatItems : selFeeItems;
+  const setSelItemsFor = (ch: SelChannel) => ch === "mat" ? setSelMatItems : setSelFeeItems;
+  const selSectionsFor = (ch: SelChannel) => ch === "mat" ? selMatSections : selFeeSections;
+  const setSelSectionsFor = (ch: SelChannel) => ch === "mat" ? setSelMatSections : setSelFeeSections;
+
+  const toggleSelectItem = useCallback((itemCode: string, ch: SelChannel) => {
+    const setter = ch === "mat" ? setSelMatItems : setSelFeeItems;
+    setter((prev) => {
+      const next = new Set(prev);
+      if (next.has(itemCode)) next.delete(itemCode);
+      else next.add(itemCode);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectSection = useCallback((sectionCode: string, ch: SelChannel) => {
+    const itemCodes = getItemCodesForSection(sectionCode);
+    const descendantSections = getDescendantSectionCodes(sectionCode);
+    const allSections = [sectionCode, ...descendantSections];
+    const secSet = selSectionsFor(ch);
+    const isCurrentlySelected = secSet.has(sectionCode);
+    const setSec = setSelSectionsFor(ch);
+    const setItm = setSelItemsFor(ch);
+
+    if (isCurrentlySelected) {
+      setSec((prev) => { const next = new Set(prev); allSections.forEach((c) => next.delete(c)); return next; });
+      setItm((prev) => { const next = new Set(prev); itemCodes.forEach((c) => next.delete(c)); return next; });
+    } else {
+      setSec((prev) => { const next = new Set(prev); allSections.forEach((c) => next.add(c)); return next; });
+      setItm((prev) => { const next = new Set(prev); itemCodes.forEach((c) => next.add(c)); return next; });
+    }
+  }, [selMatSections, selFeeSections, getItemCodesForSection, getDescendantSectionCodes]);
+
+  const toggleSelectAll = useCallback((ch: SelChannel) => {
+    const nonAltItems = workingItems.filter((i) => !i.alternativeOfItemCode);
+    const items = selItemsFor(ch);
+    if (items.size >= nonAltItems.length) {
+      setSelItemsFor(ch)(new Set());
+      setSelSectionsFor(ch)(new Set());
+    } else {
+      setSelItemsFor(ch)(new Set(nonAltItems.map((i) => i.itemCode)));
+      setSelSectionsFor(ch)(new Set(workingSections.map((s) => s.sectionCode)));
+    }
+  }, [workingItems, workingSections, selMatItems.size, selFeeItems.size]);
+
+  const clearSelection = useCallback(() => {
+    setSelMatItems(new Set());
+    setSelFeeItems(new Set());
+    setSelMatSections(new Set());
+    setSelFeeSections(new Set());
+  }, []);
+
+  /** Check if a section is partially selected for a channel */
+  const isSectionPartial = useCallback((sectionCode: string, ch: SelChannel): boolean => {
+    const itemCodes = getItemCodesForSection(sectionCode);
+    if (itemCodes.length === 0) return false;
+    const items = selItemsFor(ch);
+    const selectedCount = itemCodes.filter((c) => items.has(c)).length;
+    return selectedCount > 0 && selectedCount < itemCodes.length;
+  }, [getItemCodesForSection, selMatItems, selFeeItems]);
+
+  const selectionMaterialTotal = useMemo(
+    () => workingItems.filter((i) => selMatItems.has(i.itemCode)).reduce((sum, i) => sum + i.quantity * i.materialUnitPrice, 0),
+    [workingItems, selMatItems]
+  );
+  const selectionFeeTotal = useMemo(
+    () => workingItems.filter((i) => selFeeItems.has(i.itemCode)).reduce((sum, i) => sum + i.quantity * i.feeUnitPrice, 0),
+    [workingItems, selFeeItems]
+  );
+  const selectionGrandTotal = selectionMaterialTotal + selectionFeeTotal;
+  const selectionMatCount = selMatItems.size;
+  const selectionFeeCount = selFeeItems.size;
 
   const toInputItems = (): BudgetItemInput[] =>
     workingItems.map((i, idx) => ({
@@ -825,6 +924,28 @@ export function BudgetItemsPanel({
           <table className="w-full border-collapse text-[12px]">
             <thead className="sticky top-0 bg-[var(--slate-50)] z-[1]">
               <tr>
+                <th className="px-1 py-2 border-b border-[var(--slate-200)] w-14">
+                  <div className="flex items-center gap-0.5 justify-center">
+                    <button onClick={() => toggleSelectAll("mat")} className="text-[var(--slate-400)] hover:text-[var(--indigo-600)] cursor-pointer flex items-center" title="Anyag kijelölés">
+                      {selMatItems.size > 0 && selMatItems.size >= workingItems.filter((i) => !i.alternativeOfItemCode).length
+                        ? <CheckSquare size={13} />
+                        : selMatItems.size > 0
+                          ? <MinusSquare size={13} />
+                          : <Square size={13} />
+                      }
+                      <span className="text-[9px] font-bold ml-[1px]">A</span>
+                    </button>
+                    <button onClick={() => toggleSelectAll("fee")} className="text-[var(--slate-400)] hover:text-[var(--indigo-600)] cursor-pointer flex items-center" title="Díj kijelölés">
+                      {selFeeItems.size > 0 && selFeeItems.size >= workingItems.filter((i) => !i.alternativeOfItemCode).length
+                        ? <CheckSquare size={13} />
+                        : selFeeItems.size > 0
+                          ? <MinusSquare size={13} />
+                          : <Square size={13} />
+                      }
+                      <span className="text-[9px] font-bold ml-[1px]">D</span>
+                    </button>
+                  </div>
+                </th>
                 {["#", "Tételszám", "Megnevezés", "Menny.", "Egys.", "Anyag egyságár", "Díj egyságár", "Anyag össz.", "Díj össz.", "Megjegyzés", ""].map((h) => (
                   <th key={h} className="px-3 py-2 text-left text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.5px] border-b border-[var(--slate-200)] whitespace-nowrap">
                     {h}
@@ -845,6 +966,28 @@ export function BudgetItemsPanel({
 
                   return (
                     <tr key={`sec-${sec.sectionCode}`} className="bg-amber-50 hover:bg-amber-100">
+                      <td className="px-1 py-1.5 border-b border-amber-200 w-14">
+                        <div className="flex items-center gap-0.5 justify-center">
+                          <button onClick={() => toggleSelectSection(sec.sectionCode, "mat")} className="text-amber-500 hover:text-amber-700 cursor-pointer flex items-center" title="Anyag">
+                            {selMatSections.has(sec.sectionCode)
+                              ? <CheckSquare size={13} />
+                              : isSectionPartial(sec.sectionCode, "mat")
+                                ? <MinusSquare size={13} />
+                                : <Square size={13} />
+                            }
+                            <span className="text-[9px] font-bold ml-[1px]">A</span>
+                          </button>
+                          <button onClick={() => toggleSelectSection(sec.sectionCode, "fee")} className="text-amber-500 hover:text-amber-700 cursor-pointer flex items-center" title="Díj">
+                            {selFeeSections.has(sec.sectionCode)
+                              ? <CheckSquare size={13} />
+                              : isSectionPartial(sec.sectionCode, "fee")
+                                ? <MinusSquare size={13} />
+                                : <Square size={13} />
+                            }
+                            <span className="text-[9px] font-bold ml-[1px]">D</span>
+                          </button>
+                        </div>
+                      </td>
                       <td className="px-3 py-1.5 border-b border-amber-200" colSpan={isEditing ? 1 : 3}>
                         <div className="flex items-center gap-1" style={{ paddingLeft: indent }}>
                           <button
@@ -912,6 +1055,7 @@ export function BudgetItemsPanel({
                   const editFeeTotal = (Number(editForm.quantity) || 0) * (Number(editForm.feeUnitPrice) || 0);
                   return (
                     <tr key={item.itemCode} className={isAlt ? "bg-purple-200/80" : "bg-blue-50"}>
+                      <td className="px-1 py-2 border-b border-[var(--slate-100)] w-14" />
                       <td className="px-3 py-2 border-b border-[var(--slate-100)] text-[var(--slate-400)]">
                         {isAlt ? (
                           <span className="text-purple-400 text-[10px] font-mono pl-3">{row.altLabel}</span>
@@ -968,6 +1112,18 @@ export function BudgetItemsPanel({
                 if (isAlt) {
                   return (
                     <tr key={item.itemCode} className="bg-purple-200/80 border-l-3 border-l-purple-500">
+                      <td className="px-1 py-1.5 border-b border-purple-100 w-14">
+                        <div className="flex items-center gap-0.5 justify-center">
+                          <button onClick={() => toggleSelectItem(item.itemCode, "mat")} className="text-purple-400 hover:text-purple-700 cursor-pointer flex items-center" title="Anyag">
+                            {selMatItems.has(item.itemCode) ? <CheckSquare size={13} /> : <Square size={13} />}
+                            <span className="text-[9px] font-bold ml-[1px]">A</span>
+                          </button>
+                          <button onClick={() => toggleSelectItem(item.itemCode, "fee")} className="text-purple-400 hover:text-purple-700 cursor-pointer flex items-center" title="Díj">
+                            {selFeeItems.has(item.itemCode) ? <CheckSquare size={13} /> : <Square size={13} />}
+                            <span className="text-[9px] font-bold ml-[1px]">D</span>
+                          </button>
+                        </div>
+                      </td>
                       <td className="px-3 py-1.5 border-b border-purple-100 text-purple-400">
                         <span className="text-[10px] font-mono pl-3">{row.altLabel}</span>
                       </td>
@@ -997,7 +1153,19 @@ export function BudgetItemsPanel({
 
                 // Original item row
                 return (
-                  <tr key={item.itemCode} className="hover:[&_td]:bg-[#fafbff]">
+                  <tr key={item.itemCode} className={`hover:[&_td]:bg-[#fafbff] ${selMatItems.has(item.itemCode) || selFeeItems.has(item.itemCode) ? "[&_td]:bg-indigo-50/60" : ""}`}>
+                    <td className="px-1 py-2 border-b border-[var(--slate-100)] w-14">
+                      <div className="flex items-center gap-0.5 justify-center">
+                        <button onClick={() => toggleSelectItem(item.itemCode, "mat")} className="text-[var(--slate-400)] hover:text-[var(--indigo-600)] cursor-pointer flex items-center" title="Anyag">
+                          {selMatItems.has(item.itemCode) ? <CheckSquare size={13} className="text-[var(--indigo-600)]" /> : <Square size={13} />}
+                          <span className="text-[9px] font-bold ml-[1px]">A</span>
+                        </button>
+                        <button onClick={() => toggleSelectItem(item.itemCode, "fee")} className="text-[var(--slate-400)] hover:text-[var(--indigo-600)] cursor-pointer flex items-center" title="Díj">
+                          {selFeeItems.has(item.itemCode) ? <CheckSquare size={13} className="text-[var(--indigo-600)]" /> : <Square size={13} />}
+                          <span className="text-[9px] font-bold ml-[1px]">D</span>
+                        </button>
+                      </div>
+                    </td>
                     <td className="px-3 py-2 border-b border-[var(--slate-100)] text-[var(--slate-400)]">{row.displayIndex}</td>
                     <td className="px-3 py-2 border-b border-[var(--slate-100)] font-mono text-[11px]">{item.itemNumber || "—"}</td>
                     <td className="px-3 py-2 border-b border-[var(--slate-100)]">
@@ -1047,6 +1215,37 @@ export function BudgetItemsPanel({
         )}
       </div>
 
+      {/* Selection summary bar */}
+      {hasSelection && (
+        <div className="flex items-center gap-3 px-4 py-[8px] bg-indigo-50 border-t border-indigo-200 shrink-0">
+          <Calculator size={13} className="text-[var(--indigo-600)]" />
+          <span className="text-xs font-semibold text-[var(--indigo-700)]">
+            Kijelölés
+          </span>
+          <div className="flex-1" />
+          {selectionMatCount > 0 && (
+            <span className="text-xs text-[var(--indigo-600)] mr-3">
+              Anyag ({selectionMatCount}): <strong>{fmt(selectionMaterialTotal)}</strong>
+            </span>
+          )}
+          {selectionFeeCount > 0 && (
+            <span className="text-xs text-[var(--indigo-600)] mr-3">
+              Díj ({selectionFeeCount}): <strong>{fmt(selectionFeeTotal)}</strong>
+            </span>
+          )}
+          <span className="text-xs text-[var(--indigo-700)] font-semibold mr-3">
+            Összesen: <strong>{fmt(selectionGrandTotal)}</strong>
+          </span>
+          <button
+            onClick={clearSelection}
+            className="flex items-center gap-1 px-2 py-[3px] rounded text-[10px] text-[var(--indigo-600)] hover:bg-indigo-100 cursor-pointer transition-colors"
+          >
+            <X size={11} />
+            Kijelölés törlése
+          </button>
+        </div>
+      )}
+
       {/* Footer */}
       <div className="flex items-center px-4 py-[10px] bg-white border-t border-[var(--slate-200)] shrink-0">
         <span className="text-xs text-[var(--slate-400)]">
@@ -1058,10 +1257,13 @@ export function BudgetItemsPanel({
         </span>
         <div className="flex-1" />
         <span className="text-xs text-[var(--slate-600)] mr-4">
-          Anyag összesen: <strong>{fmt(materialTotal)}</strong>
+          Anyag: <strong>{fmt(materialTotal)}</strong>
         </span>
-        <span className="text-xs text-[var(--slate-600)]">
-          Díj összesen: <strong>{fmt(feeTotal)}</strong>
+        <span className="text-xs text-[var(--slate-600)] mr-4">
+          Díj: <strong>{fmt(feeTotal)}</strong>
+        </span>
+        <span className="text-xs text-[var(--slate-800)] font-semibold">
+          Összesen: <strong>{fmt(grandTotal)}</strong>
         </span>
       </div>
     </div>

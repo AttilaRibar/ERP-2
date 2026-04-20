@@ -1,23 +1,26 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { ArrowLeft, Database, GitBranch, Pencil, Trash2, FileSpreadsheet } from "lucide-react";
+import { ArrowLeft, Database, GitBranch, Pencil, Trash2, FileSpreadsheet, GitCompareArrows } from "lucide-react";
 import { getBudgetById, deleteBudget } from "@/server/actions/budgets";
 import { type VersionType } from "@/server/actions/versions";
+import { type CompareType, type CompareState, type SimpleCompareState, type MultiCompareState } from "@/server/actions/comparisons";
 import { useTabStore } from "@/stores/tab-store";
 import { VersionGraph } from "./VersionGraph";
 import { VersionComparison } from "./VersionComparison";
 import { MultiVersionComparison } from "./MultiVersionComparison";
 import { BudgetItemsPanel } from "./BudgetItemsPanel";
 import { ImportPanel } from "./ImportPanel";
+import { SavedComparisons } from "./SavedComparisons";
 
 type DetailView =
   | { type: "data" }
   | { type: "versions" }
   | { type: "import" }
+  | { type: "comparisons" }
   | { type: "version-items"; versionId: number; versionName: string; versionType: VersionType; partnerName: string | null }
-  | { type: "comparison"; versionAId: number; versionBId: number; nameA: string; nameB: string }
-  | { type: "multi-comparison"; versionIds: number[]; versionNames: string[] };
+  | { type: "comparison"; versionAId: number; versionBId: number; nameA: string; nameB: string; savedState?: SimpleCompareState }
+  | { type: "multi-comparison"; versionIds: number[]; versionNames: string[]; savedState?: MultiCompareState };
 
 interface BudgetDetailProps {
   budgetId: number;
@@ -91,9 +94,40 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
     setView({ type: "versions" });
   }, []);
 
+  const handleOpenComparisonInTab = useCallback(
+    (_comparisonId: number, name: string, compareType: CompareType, versionIds: number[], versionNames: string[], state: CompareState) => {
+      openTab({
+        moduleKey: "budgets-comparison",
+        title: name,
+        color: "#f59e0b",
+        tabType: "view",
+        params: { budgetId, compareType, versionIds, versionNames, state },
+      });
+    },
+    [budgetId, openTab]
+  );
+
+  const handleOpenSavedComparison = useCallback(
+    (compareType: CompareType, versionIds: number[], versionNames: string[], state: CompareState) => {
+      if (compareType === "simple" && versionIds.length === 2) {
+        const simpleState = state as SimpleCompareState;
+        setView({ type: "comparison", versionAId: versionIds[0], versionBId: versionIds[1], nameA: versionNames[0], nameB: versionNames[1], savedState: simpleState });
+      } else {
+        const multiState = state as MultiCompareState;
+        setView({ type: "multi-comparison", versionIds, versionNames, savedState: multiState });
+      }
+    },
+    []
+  );
+
+  const handleNewComparison = useCallback(() => {
+    setView({ type: "versions" });
+  }, []);
+
   const sidebarItems: { key: string; label: string; icon: typeof Database }[] = [
     { key: "data", label: "Adatok", icon: Database },
     { key: "versions", label: "Verziók", icon: GitBranch },
+    { key: "comparisons", label: "Összehasonlítások", icon: GitCompareArrows },
     { key: "import", label: "Importálás", icon: FileSpreadsheet },
   ];
 
@@ -143,7 +177,7 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
           {sidebarItems.map(({ key, label, icon: Icon }) => (
             <button
               key={key}
-              onClick={() => setView({ type: key as "data" | "versions" | "import" })}
+              onClick={() => setView({ type: key as "data" | "versions" | "import" | "comparisons" })}
               className={`flex items-center gap-2 px-3 py-[7px] rounded-[6px] text-xs transition-colors cursor-pointer ${
                 activeSidebarKey === key
                   ? "bg-[var(--violet-100)] text-[var(--violet-900)] font-medium"
@@ -250,6 +284,8 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
             nameA={view.nameA}
             nameB={view.nameB}
             onBack={handleBackToVersions}
+            budgetId={budgetId}
+            initialState={view.savedState}
           />
         )}
 
@@ -258,6 +294,17 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
             versionIds={view.versionIds}
             versionNames={view.versionNames}
             onBack={handleBackToVersions}
+            budgetId={budgetId}
+            initialState={view.savedState}
+          />
+        )}
+
+        {view.type === "comparisons" && (
+          <SavedComparisons
+            budgetId={budgetId}
+            onOpenComparison={handleOpenSavedComparison}
+            onOpenInTab={handleOpenComparisonInTab}
+            onNewComparison={handleNewComparison}
           />
         )}
 
