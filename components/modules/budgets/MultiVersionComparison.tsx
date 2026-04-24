@@ -8,6 +8,7 @@ import {
   type MultiComparisonResult,
   type MultiVersionEntry,
   type MultiVersionItemEntry,
+  type MultiVersionItemPrice,
   type SectionTotals,
 } from "@/server/actions/versions";
 import { createSavedComparison, type MultiCompareState } from "@/server/actions/comparisons";
@@ -273,6 +274,8 @@ function OverviewView({
 
 // ---- Sections View (category-level comparison) ----
 
+type PriceField = "combined" | "material" | "fee";
+
 function flattenSections(
   totals: SectionTotals[],
   depth: number = 0
@@ -349,17 +352,29 @@ function SectionRow({
   cheapestMap,
   skipZero,
   referenceVersionIdx,
+  sectionItems,
+  sectionCodeToItems,
+  priceField,
+  allVersions,
+  hiddenVersionIdxs,
 }: {
   section: UnifiedSection;
   visibleEntries: VersionEntry[];
   cheapestMap: Map<string, number>;
   skipZero: boolean;
   referenceVersionIdx: number | null;
+  sectionItems: MultiVersionItemEntry[];
+  sectionCodeToItems: Map<string | null, MultiVersionItemEntry[]>;
+  priceField: PriceField;
+  allVersions: MultiVersionEntry[];
+  hiddenVersionIdxs: Set<number>;
 }) {
   void cheapestMap;
   const [collapsed, setCollapsed] = useState(false);
   const indent = section.depth * 16;
   const hasChildren = section.children.length > 0;
+  const hasItems = sectionItems.length > 0;
+  const isExpandable = hasChildren || hasItems;
 
   // Get totals for this section from each version (embedded during tree build)
   const sectionValues = visibleEntries.map((_, displayPos) => {
@@ -373,67 +388,124 @@ function SectionRow({
     };
   });
 
+  // Helper to extract the relevant value based on priceField
+  const mainSv = (sv: { material: number; fee: number; combined: number }) =>
+    priceField === "material" ? sv.material : priceField === "fee" ? sv.fee : sv.combined;
+
   // Only compare versions that actually have this section
   const existingValues = sectionValues
-    .map((sv, i) => ({ val: sv.combined, idx: i, exists: sv.exists }))
+    .map((sv, i) => ({ val: mainSv(sv), idx: i, exists: sv.exists }))
     .filter((x) => x.exists && (!skipZero || x.val !== 0));
-  const cheapestDisplayPos = existingValues.length > 0
-    ? existingValues.reduce((min, cur) => (cur.val < min.val ? cur : min)).idx
-    : -1;
+  const cheapestDisplayPos =
+    existingValues.length > 0
+      ? existingValues.reduce((min, cur) => (cur.val < min.val ? cur : min)).idx
+      : -1;
 
   // Reference entry in visible list (display position)
-  const refDisplayPos = referenceVersionIdx !== null
-    ? visibleEntries.findIndex((x) => x.originalIdx === referenceVersionIdx)
-    : -1;
+  const refDisplayPos =
+    referenceVersionIdx !== null
+      ? visibleEntries.findIndex((x) => x.originalIdx === referenceVersionIdx)
+      : -1;
   const refSv = refDisplayPos >= 0 ? sectionValues[refDisplayPos] : null;
 
   return (
     <>
       <tr
-        className={`${hasChildren ? "cursor-pointer select-none" : ""} ${
-          section.depth === 0 ? "bg-amber-50 font-semibold" : "bg-[#fffbf0] hover:bg-amber-50/50"
+        className={`${isExpandable ? "cursor-pointer select-none" : ""} ${
+          section.depth === 0
+            ? "bg-amber-50 font-semibold"
+            : "bg-[#fffbf0] hover:bg-amber-50/50"
         }`}
-        onClick={hasChildren ? () => setCollapsed((c) => !c) : undefined}
+        onClick={isExpandable ? () => setCollapsed((c) => !c) : undefined}
       >
         <td
           className="px-3 py-2 border-b border-amber-100"
           style={{ paddingLeft: 12 + indent }}
         >
           <span className="flex items-center gap-1">
-            {hasChildren && (
-              collapsed
-                ? <ChevronRight size={12} className="text-[var(--slate-400)]" />
-                : <ChevronDown size={12} className="text-[var(--slate-400)]" />
-            )}
-            <span className={`text-xs ${section.depth === 0 ? "text-amber-900" : "text-[var(--slate-700)]"}`}>
+            {isExpandable &&
+              (collapsed ? (
+                <ChevronRight size={12} className="text-[var(--slate-400)]" />
+              ) : (
+                <ChevronDown size={12} className="text-[var(--slate-400)]" />
+              ))}
+            {!isExpandable && <span className="w-3 shrink-0" />}
+            <span
+              className={`text-xs ${
+                section.depth === 0 ? "text-amber-900" : "text-[var(--slate-700)]"
+              }`}
+            >
               {section.sectionName}
             </span>
+            {hasItems && !collapsed && (
+              <span className="ml-1 text-[9px] text-[var(--slate-400)] font-normal">
+                ({sectionItems.length})
+              </span>
+            )}
           </span>
         </td>
         {visibleEntries.map(({ originalIdx }, displayPos) => {
           const sv = sectionValues[displayPos];
+          const mainVal = mainSv(sv);
           const isCheapest = displayPos === cheapestDisplayPos && existingValues.length > 1;
           const isRef = originalIdx === referenceVersionIdx;
-          const delta = refSv && sv.exists && !isRef && refSv.exists ? sv.combined - refSv.combined : null;
-          const deltaPct = delta !== null && refSv && refSv.combined > 0 ? (delta / refSv.combined) * 100 : null;
+          const refMain = refSv ? mainSv(refSv) : 0;
+          const delta =
+            refSv && sv.exists && !isRef && refSv.exists ? mainVal - refMain : null;
+          const deltaPct =
+            delta !== null && refMain > 0 ? (delta / refMain) * 100 : null;
           return (
             <td
               key={originalIdx}
-              className={`px-3 py-2 border-b border-amber-100 text-right ${isRef ? "bg-amber-50/60" : isCheapest ? "bg-green-50" : ""}`}
+              className={`px-3 py-2 border-b border-amber-100 text-right ${
+                isRef ? "bg-amber-50/60" : isCheapest ? "bg-green-50" : ""
+              }`}
             >
               {sv.exists ? (
                 <div>
-                  <div className={`text-xs font-semibold ${isRef ? "text-amber-700" : isCheapest ? "text-green-700" : "text-[var(--slate-800)]"}`}>
-                    {fmt(sv.combined)}
-                    {isCheapest && !isRef && <Trophy size={8} className="inline ml-0.5 text-green-600" />}
+                  <div
+                    className={`text-xs font-semibold ${
+                      isRef
+                        ? "text-amber-700"
+                        : isCheapest
+                        ? "text-green-700"
+                        : "text-[var(--slate-800)]"
+                    }`}
+                  >
+                    {fmt(mainVal)}
+                    {isCheapest && !isRef && (
+                      <Trophy size={8} className="inline ml-0.5 text-green-600" />
+                    )}
                     {isRef && <Pin size={8} className="inline ml-0.5 text-amber-500" />}
                   </div>
-                  <div className="text-[10px] text-[var(--slate-400)]">
-                    A: {fmt(sv.material)} | D: {fmt(sv.fee)}
-                  </div>
+                  {priceField === "combined" && (
+                    <div className="text-[10px] text-[var(--slate-400)]">
+                      A: {fmt(sv.material)} | D: {fmt(sv.fee)}
+                    </div>
+                  )}
+                  {priceField === "material" && (
+                    <div className="text-[10px] text-[var(--slate-400)]">
+                      D: {fmt(sv.fee)}
+                    </div>
+                  )}
+                  {priceField === "fee" && (
+                    <div className="text-[10px] text-[var(--slate-400)]">
+                      A: {fmt(sv.material)}
+                    </div>
+                  )}
                   {delta !== null && deltaPct !== null && (
-                    <div className={`text-[9px] font-medium mt-0.5 ${delta > 0 ? "text-red-500" : delta < 0 ? "text-green-600" : "text-[var(--slate-400)]"}`}>
-                      {delta >= 0 ? "+" : ""}{fmt(delta)} ({delta >= 0 ? "+" : ""}{deltaPct.toFixed(1)}%)
+                    <div
+                      className={`text-[9px] font-medium mt-0.5 ${
+                        delta > 0
+                          ? "text-red-500"
+                          : delta < 0
+                          ? "text-green-600"
+                          : "text-[var(--slate-400)]"
+                      }`}
+                    >
+                      {delta >= 0 ? "+" : ""}
+                      {fmt(delta)} ({delta >= 0 ? "+" : ""}
+                      {deltaPct.toFixed(1)}%)
                     </div>
                   )}
                 </div>
@@ -453,6 +525,25 @@ function SectionRow({
             cheapestMap={new Map()}
             skipZero={skipZero}
             referenceVersionIdx={referenceVersionIdx}
+            sectionItems={sectionCodeToItems.get(child.sectionCode) ?? []}
+            sectionCodeToItems={sectionCodeToItems}
+            priceField={priceField}
+            allVersions={allVersions}
+            hiddenVersionIdxs={hiddenVersionIdxs}
+          />
+        ))}
+      {!collapsed &&
+        sectionItems.map((item) => (
+          <ItemRow
+            key={item.itemCode}
+            item={item}
+            visibleEntries={visibleEntries}
+            priceField={priceField}
+            referenceVersionIdx={referenceVersionIdx}
+            skipZero={skipZero}
+            depth={section.depth + 1}
+            allVersions={allVersions}
+            hiddenVersionIdxs={hiddenVersionIdxs}
           />
         ))}
     </>
@@ -472,10 +563,21 @@ function SectionsView({
   orderedVersions: VersionEntry[];
   referenceVersionIdx: number | null;
 }) {
-  void result;
+  const [priceField, setPriceField] = useState<PriceField>("combined");
   const visibleEntries = orderedVersions.filter((x) => !hiddenVersionIdxs.has(x.originalIdx));
   const versions = visibleEntries.map((x) => x.version);
   const unifiedTree = useMemo(() => buildUnifiedSectionTree(versions), [versions]);
+
+  // Map sectionCode → items directly in that section
+  const sectionCodeToItems = useMemo(() => {
+    const map = new Map<string | null, MultiVersionItemEntry[]>();
+    for (const item of result.items) {
+      const key = item.sectionCode ?? null;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(item);
+    }
+    return map;
+  }, [result.items]);
 
   // When skipZero, filter out sections where ALL versions have 0 total
   const filteredTree = useMemo(() => {
@@ -499,7 +601,46 @@ function SectionsView({
   }, [unifiedTree, skipZero]);
 
   return (
-    <div className="p-4">
+    <div className="p-4 space-y-3">
+      {/* Price field toggle */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] text-[var(--slate-400)]">Megjelenítés:</span>
+        <div className="flex items-center border border-[var(--slate-200)] rounded-[6px] overflow-hidden">
+          <button
+            onClick={() => setPriceField("combined")}
+            className={`px-2.5 py-[4px] text-xs cursor-pointer transition-colors ${
+              priceField === "combined"
+                ? "bg-[var(--indigo-600)] text-white"
+                : "text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
+            }`}
+          >
+            A+D
+          </button>
+          <button
+            onClick={() => setPriceField("material")}
+            className={`px-2.5 py-[4px] text-xs cursor-pointer transition-colors ${
+              priceField === "material"
+                ? "bg-[var(--indigo-600)] text-white"
+                : "text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
+            }`}
+          >
+            Anyag
+          </button>
+          <button
+            onClick={() => setPriceField("fee")}
+            className={`px-2.5 py-[4px] text-xs cursor-pointer transition-colors ${
+              priceField === "fee"
+                ? "bg-[var(--indigo-600)] text-white"
+                : "text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
+            }`}
+          >
+            Díj
+          </button>
+        </div>
+        <span className="text-[10px] text-[var(--slate-400)]">
+          · Kategóriára kattintva a tételek is megjelennek
+        </span>
+      </div>
       <div className="bg-white rounded-lg border border-[var(--slate-200)] overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-xs border-collapse">
@@ -542,12 +683,26 @@ function SectionsView({
                   cheapestMap={new Map()}
                   skipZero={skipZero}
                   referenceVersionIdx={referenceVersionIdx}
+                  sectionItems={sectionCodeToItems.get(section.sectionCode) ?? []}
+                  sectionCodeToItems={sectionCodeToItems}
+                  priceField={priceField}
+                  allVersions={result.versions}
+                  hiddenVersionIdxs={hiddenVersionIdxs}
                 />
               ))}
               {/* Grand total row */}
               {(() => {
-                const cheapestPos = findCheapestIdx(versions.map((x) => x.totalCombined), skipZero);
-                const refEntry = referenceVersionIdx !== null ? visibleEntries.find((x) => x.originalIdx === referenceVersionIdx) ?? null : null;
+                const getVersionTotal = (v: MultiVersionEntry) =>
+                  priceField === "material"
+                    ? v.totalMaterial
+                    : priceField === "fee"
+                    ? v.totalFee
+                    : v.totalCombined;
+                const cheapestPos = findCheapestIdx(versions.map(getVersionTotal), skipZero);
+                const refEntry =
+                  referenceVersionIdx !== null
+                    ? visibleEntries.find((x) => x.originalIdx === referenceVersionIdx) ?? null
+                    : null;
                 return (
                   <tr className="bg-[var(--slate-100)] font-bold border-t-2 border-[var(--slate-300)]">
                     <td className="px-3 py-2.5 text-[var(--slate-800)] sticky left-0 bg-[var(--slate-100)] z-10">
@@ -556,25 +711,65 @@ function SectionsView({
                     {visibleEntries.map(({ version: v, originalIdx }, displayPos) => {
                       const isCheapest = displayPos === cheapestPos;
                       const isRef = originalIdx === referenceVersionIdx;
-                      const delta = refEntry && !isRef ? v.totalCombined - refEntry.version.totalCombined : null;
-                      const deltaPct = delta !== null && refEntry && refEntry.version.totalCombined > 0
-                        ? (delta / refEntry.version.totalCombined) * 100 : null;
+                      const mainVal = getVersionTotal(v);
+                      const refMain = refEntry ? getVersionTotal(refEntry.version) : 0;
+                      const delta = refEntry && !isRef ? mainVal - refMain : null;
+                      const deltaPct =
+                        delta !== null && refMain > 0
+                          ? (delta / refMain) * 100
+                          : null;
                       return (
                         <td
                           key={originalIdx}
-                          className={`px-3 py-2.5 text-right ${isRef ? "bg-amber-50" : isCheapest ? "bg-green-100" : ""}`}
+                          className={`px-3 py-2.5 text-right ${
+                            isRef ? "bg-amber-50" : isCheapest ? "bg-green-100" : ""
+                          }`}
                         >
-                          <div className={`text-sm font-bold ${isRef ? "text-amber-700" : isCheapest ? "text-green-700" : "text-[var(--slate-800)]"}`}>
-                            {fmt(v.totalCombined)}
-                            {isCheapest && !isRef && <Trophy size={10} className="inline ml-1 text-green-600" />}
-                            {isRef && <Pin size={9} className="inline ml-1 text-amber-500" />}
+                          <div
+                            className={`text-sm font-bold ${
+                              isRef
+                                ? "text-amber-700"
+                                : isCheapest
+                                ? "text-green-700"
+                                : "text-[var(--slate-800)]"
+                            }`}
+                          >
+                            {fmt(mainVal)}
+                            {isCheapest && !isRef && (
+                              <Trophy size={10} className="inline ml-1 text-green-600" />
+                            )}
+                            {isRef && (
+                              <Pin size={9} className="inline ml-1 text-amber-500" />
+                            )}
                           </div>
-                          <div className="text-[10px] text-[var(--slate-400)] font-normal">
-                            A: {fmt(v.totalMaterial)} | D: {fmt(v.totalFee)}
-                          </div>
+                          {priceField === "combined" && (
+                            <div className="text-[10px] text-[var(--slate-400)] font-normal">
+                              A: {fmt(v.totalMaterial)} | D: {fmt(v.totalFee)}
+                            </div>
+                          )}
+                          {priceField === "material" && (
+                            <div className="text-[10px] text-[var(--slate-400)] font-normal">
+                              D: {fmt(v.totalFee)}
+                            </div>
+                          )}
+                          {priceField === "fee" && (
+                            <div className="text-[10px] text-[var(--slate-400)] font-normal">
+                              A: {fmt(v.totalMaterial)}
+                            </div>
+                          )}
                           {delta !== null && deltaPct !== null && (
-                            <div className={`text-[9px] font-medium mt-0.5 ${delta > 0 ? "text-red-500" : delta < 0 ? "text-green-600" : "text-[var(--slate-400)]"}`}>
-                              {delta >= 0 ? "+" : ""}{fmt(delta)} ({delta >= 0 ? "+" : ""}{deltaPct.toFixed(1)}%)
+                            <div
+                              className={`text-[9px] font-medium mt-0.5 ${
+                                delta > 0
+                                  ? "text-red-500"
+                                  : delta < 0
+                                  ? "text-green-600"
+                                  : "text-[var(--slate-400)]"
+                              }`}
+                            >
+                              {delta >= 0 ? "+" : ""}
+                              {fmt(delta)} ({delta >= 0 ? "+" : ""}
+                              {deltaPct.toFixed(1)}%)
                             </div>
                           )}
                         </td>
@@ -588,6 +783,442 @@ function SectionsView({
         </div>
       </div>
     </div>
+  );
+}
+
+// ---- Section Item Tooltip (per-item detail, used in Sections view) ----
+
+function SectionItemTooltip({
+  item,
+  versions,
+  hiddenVersionIdxs,
+  skipZero,
+  x,
+  y,
+  onEnter,
+  onLeave,
+}: {
+  item: MultiVersionItemEntry;
+  versions: MultiVersionEntry[];
+  hiddenVersionIdxs: Set<number>;
+  skipZero: boolean;
+  x: number;
+  y: number;
+  onEnter: () => void;
+  onLeave: () => void;
+}) {
+  const entries = item.perVersion
+    .map((pv, idx) => ({ pv, idx, version: versions[idx] }))
+    .filter(
+      ({ pv, idx }) =>
+        !hiddenVersionIdxs.has(idx) &&
+        pv !== null &&
+        (!skipZero || pv.combinedUnitPrice !== 0),
+    );
+
+  if (entries.length === 0) return null;
+
+  const combinedTotals = entries.map((e) => e.pv!.combinedTotal);
+  const combinedUnits = entries.map((e) => e.pv!.combinedUnitPrice);
+  const minTotal = Math.min(...combinedTotals);
+  const maxTotal = Math.max(...combinedTotals);
+  const minUnit = Math.min(...combinedUnits);
+  const maxUnit = Math.max(...combinedUnits);
+  const hasVariance = entries.length > 1;
+
+  const diffUnit = maxUnit - minUnit;
+  const avgUnit = combinedUnits.reduce((s, v) => s + v, 0) / combinedUnits.length;
+  const diffUnitPct = avgUnit > 0 ? (diffUnit / avgUnit) * 100 : 0;
+  const diffTotal = maxTotal - minTotal;
+  const avgTotal = combinedTotals.reduce((s, v) => s + v, 0) / combinedTotals.length;
+  const diffTotalPct = avgTotal > 0 ? (diffTotal / avgTotal) * 100 : 0;
+
+  const vpW = typeof window !== "undefined" ? window.innerWidth : 1200;
+  const vpH = typeof window !== "undefined" ? window.innerHeight : 800;
+  const maxW = vpW - 24;
+  const posX = Math.max(8, Math.min(x, vpW - 400));
+  const posY = y + 240 > vpH ? Math.max(8, y - 300) : y;
+
+  return (
+    <div
+      className="fixed z-[200] bg-white rounded-xl shadow-2xl border border-[var(--slate-200)] overflow-hidden text-xs"
+      style={{ left: posX, top: posY, maxWidth: maxW, width: "max-content", maxHeight: "70vh", overflowY: "auto" }}
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
+    >
+      <div className="bg-[var(--slate-700)] text-white px-4 py-2.5 sticky top-0 z-10">
+        <div className="font-bold text-[13px] leading-snug whitespace-normal break-words max-w-[600px]">{item.name}</div>
+        <div className="text-[10px] text-[var(--slate-300)] mt-0.5 flex items-center gap-2">
+          {item.itemNumber && <span className="font-mono">#{item.itemNumber}</span>}
+          {item.sectionName && <span>{item.sectionName}</span>}
+          <span className="text-[var(--slate-400)]">·</span>
+          <span>{entries.length} ajánlat összehasonlítva</span>
+        </div>
+      </div>
+      <table className="border-collapse" style={{ width: "max-content" }}>
+        <colgroup>
+          <col /><col /><col /><col /><col />
+          <col style={{ width: "56px" }} /><col style={{ width: "8px" }} />
+          <col /><col /><col />
+          <col style={{ width: "56px" }} />
+        </colgroup>
+        <thead>
+          <tr className="bg-[var(--slate-50)] border-b border-[var(--slate-200)]">
+            <th className="text-left px-3 py-1.5 text-[var(--slate-500)] font-medium">Alvállalkozó</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Menny.</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Anyag e.ár</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Díj e.ár</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">A+D e.ár</th>
+            <th className="px-1 py-1.5" />
+            <th className="px-0 py-1.5 bg-[var(--slate-200)]" />
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Anyag sum.</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">Díj sum.</th>
+            <th className="text-right px-3 py-1.5 text-[var(--slate-500)] font-medium whitespace-nowrap">A+D sum.</th>
+            <th className="px-1 py-1.5" />
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map(({ pv, idx, version }) => {
+            const isMinTotal = hasVariance && pv!.combinedTotal === minTotal;
+            const isMaxTotal = hasVariance && pv!.combinedTotal === maxTotal;
+            const isMinUnit = hasVariance && pv!.combinedUnitPrice === minUnit;
+            const isMaxUnit = hasVariance && pv!.combinedUnitPrice === maxUnit;
+            const color = getColor(idx);
+            const deviationFromMin =
+              minUnit > 0 ? ((pv!.combinedUnitPrice - minUnit) / minUnit) * 100 : 0;
+            const totalDeviationFromMin =
+              minTotal > 0 ? ((pv!.combinedTotal - minTotal) / minTotal) * 100 : 0;
+            return (
+              <tr
+                key={idx}
+                className={`border-b border-[var(--slate-100)] ${
+                  isMinTotal ? "bg-green-50" : isMaxTotal ? "bg-red-50/40" : ""
+                }`}
+              >
+                <td className="px-3 py-1.5 font-medium">
+                  <div className={`flex items-center gap-1.5 ${color.text}`}>
+                    {isMinTotal && hasVariance && (
+                      <span className="shrink-0 text-green-600 text-[12px] leading-none">▼</span>
+                    )}
+                    {isMaxTotal && hasVariance && (
+                      <span className="shrink-0 text-red-600 text-[12px] leading-none">▲</span>
+                    )}
+                    {!isMinTotal && !isMaxTotal && hasVariance && (
+                      <span className="shrink-0 w-[12px]" />
+                    )}
+                    <span
+                      className="truncate max-w-[140px]"
+                      title={version.partnerName ?? version.versionName}
+                    >
+                      {version.partnerName ?? version.versionName}
+                    </span>
+                  </div>
+                </td>
+                <td className="px-3 py-1.5 text-right text-[var(--slate-600)] whitespace-nowrap">
+                  {fmtDetailed(pv!.quantity)} {item.unit}
+                </td>
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmtDetailed(pv!.materialUnitPrice)}
+                </td>
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmtDetailed(pv!.feeUnitPrice)}
+                </td>
+                <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                  <span
+                    className={`font-semibold ${
+                      isMinUnit
+                        ? "text-green-700"
+                        : isMaxUnit
+                        ? "text-red-700"
+                        : "text-[var(--slate-800)]"
+                    }`}
+                  >
+                    {fmtDetailed(pv!.combinedUnitPrice)}
+                    {isMinUnit && hasVariance && (
+                      <span className="ml-0.5 text-[9px] text-green-600">▼</span>
+                    )}
+                    {isMaxUnit && hasVariance && (
+                      <span className="ml-0.5 text-[9px] text-red-600">▲</span>
+                    )}
+                  </span>
+                </td>
+                <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                  {!isMinUnit && hasVariance && deviationFromMin > 0 ? (
+                    <span className="text-[10px] text-[var(--slate-400)]">
+                      (+{deviationFromMin.toFixed(1)}%)
+                    </span>
+                  ) : (
+                    <span />
+                  )}
+                </td>
+                <td className="p-0 bg-[var(--slate-100)]" />
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmt(pv!.materialTotal)}
+                </td>
+                <td className="px-3 py-1.5 text-right text-[var(--slate-700)] whitespace-nowrap">
+                  {fmt(pv!.feeTotal)}
+                </td>
+                <td className="px-3 py-1.5 text-right whitespace-nowrap">
+                  <span
+                    className={`font-semibold ${
+                      isMinTotal
+                        ? "text-green-700"
+                        : isMaxTotal
+                        ? "text-red-700"
+                        : "text-[var(--slate-800)]"
+                    }`}
+                  >
+                    {fmt(pv!.combinedTotal)}
+                    {isMinTotal && hasVariance && (
+                      <span className="ml-0.5 text-[9px] text-green-600">▼</span>
+                    )}
+                    {isMaxTotal && hasVariance && (
+                      <span className="ml-0.5 text-[9px] text-red-600">▲</span>
+                    )}
+                  </span>
+                </td>
+                <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                  {!isMinTotal && hasVariance && totalDeviationFromMin > 0 ? (
+                    <span className="text-[10px] text-[var(--slate-400)]">
+                      (+{totalDeviationFromMin.toFixed(1)}%)
+                    </span>
+                  ) : (
+                    <span />
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+        {hasVariance && (
+          <tfoot>
+            <tr className="bg-[var(--slate-100)] border-t-2 border-[var(--slate-300)]">
+              <td colSpan={4} className="px-3 py-1.5 text-[var(--slate-500)] font-semibold whitespace-nowrap">
+                Eltérés (max − min)
+              </td>
+              <td className="px-3 py-1.5 text-right font-bold text-red-700 whitespace-nowrap">
+                +{fmtDetailed(diffUnit)}
+              </td>
+              <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                <span className="text-[10px] font-normal text-red-500">({diffUnitPct.toFixed(1)}%)</span>
+              </td>
+              <td className="p-0 bg-[var(--slate-200)]" />
+              <td className="px-3 py-1.5 text-right text-[var(--slate-400)]">—</td>
+              <td className="px-3 py-1.5 text-right text-[var(--slate-400)]">—</td>
+              <td className="px-3 py-1.5 text-right font-bold text-red-700 whitespace-nowrap">
+                +{fmt(diffTotal)}
+              </td>
+              <td className="pl-1 pr-2 py-1.5 text-left whitespace-nowrap">
+                <span className="text-[10px] font-normal text-red-500">({diffTotalPct.toFixed(1)}%)</span>
+              </td>
+            </tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
+  );
+}
+
+// ---- Item Row (inline item under section in Sections view) ----
+
+function ItemRow({
+  item,
+  visibleEntries,
+  priceField,
+  referenceVersionIdx,
+  skipZero,
+  depth,
+  allVersions,
+  hiddenVersionIdxs,
+}: {
+  item: MultiVersionItemEntry;
+  visibleEntries: VersionEntry[];
+  priceField: PriceField;
+  referenceVersionIdx: number | null;
+  skipZero: boolean;
+  depth: number;
+  allVersions: MultiVersionEntry[];
+  hiddenVersionIdxs: Set<number>;
+}) {
+  const indent = depth * 16;
+  const [tooltip, setTooltip] = useState<{ x: number; y: number } | null>(null);
+  const tooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const getVal = (pv: MultiVersionItemPrice) => {
+    if (priceField === "material") return { total: pv.materialTotal, unit: pv.materialUnitPrice };
+    if (priceField === "fee") return { total: pv.feeTotal, unit: pv.feeUnitPrice };
+    return { total: pv.combinedTotal, unit: pv.combinedUnitPrice };
+  };
+
+  const values = visibleEntries.map(({ originalIdx }) => {
+    const pv = item.perVersion[originalIdx];
+    if (!pv) return null;
+    return { ...getVal(pv), qty: pv.quantity };
+  });
+
+  const existingVals = values
+    .map((v, i) => (v ? { val: v.total, i } : null))
+    .filter((x): x is { val: number; i: number } => x !== null && (!skipZero || x.val !== 0));
+
+  if (skipZero && existingVals.length === 0) return null;
+
+  const cheapestDisplayPos =
+    existingVals.length > 1
+      ? existingVals.reduce((min, cur) => (cur.val < min.val ? cur : min)).i
+      : -1;
+  const mostExpensiveDisplayPos =
+    existingVals.length > 1
+      ? existingVals.reduce((max, cur) => (cur.val > max.val ? cur : max)).i
+      : -1;
+
+  const refDisplayPos =
+    referenceVersionIdx !== null
+      ? visibleEntries.findIndex((x) => x.originalIdx === referenceVersionIdx)
+      : -1;
+  const refVal = refDisplayPos >= 0 ? values[refDisplayPos] : null;
+
+  const handleNameEnter = (e: React.MouseEvent) => {
+    if (tooltipTimerRef.current) clearTimeout(tooltipTimerRef.current);
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const vpH = window.innerHeight;
+    const estH = 300;
+    const y = rect.bottom + estH > vpH ? Math.max(8, rect.top - estH - 4) : rect.bottom + 4;
+    setTooltip({ x: rect.left, y });
+  };
+
+  const handleNameLeave = () => {
+    tooltipTimerRef.current = setTimeout(() => setTooltip(null), 160);
+  };
+
+  return (
+    <>
+      <tr className="bg-white hover:bg-[var(--slate-50)]">
+        {/* Sticky name cell — maxWidth:0 prevents this cell from widening the column */}
+        <td
+          className="sticky left-0 z-[1] bg-white border-b border-[var(--slate-100)] px-3 py-1.5 cursor-help"
+          style={{ paddingLeft: 12 + indent, maxWidth: 0 }}
+          onMouseEnter={handleNameEnter}
+          onMouseLeave={handleNameLeave}
+        >
+          <div className="flex items-baseline gap-1.5 overflow-hidden">
+            {item.itemNumber && (
+              <span className="font-mono text-[9px] text-[var(--slate-400)] shrink-0 whitespace-nowrap">
+                {item.itemNumber}
+              </span>
+            )}
+            <span
+              className="text-[11px] text-[var(--slate-600)] truncate underline decoration-dotted decoration-[var(--slate-300)] underline-offset-2"
+              title={item.name}
+            >
+              {item.name}
+            </span>
+            {item.unit && (
+              <span className="text-[9px] text-[var(--slate-400)] shrink-0 whitespace-nowrap">
+                {item.unit}
+              </span>
+            )}
+          </div>
+        </td>
+        {visibleEntries.map(({ originalIdx }, displayPos) => {
+          const v = values[displayPos];
+          const pv = item.perVersion[originalIdx];
+          const isRef = originalIdx === referenceVersionIdx;
+          const isCheapest = displayPos === cheapestDisplayPos && existingVals.length > 1;
+          const isMostExpensive =
+            displayPos === mostExpensiveDisplayPos && existingVals.length > 1;
+
+          if (!v || !pv || (skipZero && v.total === 0)) {
+            return (
+              <td
+                key={originalIdx}
+                className={`px-3 py-1.5 text-right border-b border-[var(--slate-100)] whitespace-nowrap ${
+                  isRef ? "bg-amber-50/40" : ""
+                }`}
+              >
+                <span className="text-[10px] text-[var(--slate-300)]">—</span>
+              </td>
+            );
+          }
+
+          const delta =
+            refVal && !isRef && refVal.total > 0 ? v.total - refVal.total : null;
+          const deltaPct =
+            delta !== null && refVal && refVal.total > 0
+              ? (delta / refVal.total) * 100
+              : null;
+
+          return (
+            <td
+              key={originalIdx}
+              className={`px-3 py-1.5 text-right border-b border-[var(--slate-100)] whitespace-nowrap ${
+                isRef
+                  ? "bg-amber-50/40"
+                  : isCheapest
+                  ? "bg-green-50"
+                  : isMostExpensive
+                  ? "bg-red-50/30"
+                  : ""
+              }`}
+            >
+              <span
+                className={`text-xs font-semibold ${
+                  isRef
+                    ? "text-amber-700"
+                    : isCheapest
+                    ? "text-green-700"
+                    : isMostExpensive
+                    ? "text-red-700"
+                    : "text-[var(--slate-800)]"
+                }`}
+              >
+                {fmt(v.total)}
+                {isCheapest && !isRef && (
+                  <span className="ml-0.5 text-[9px] text-green-600">▼</span>
+                )}
+                {isMostExpensive && !isRef && (
+                  <span className="ml-0.5 text-[9px] text-red-600">▲</span>
+                )}
+                {isRef && <Pin size={8} className="inline ml-0.5 text-amber-500" />}
+              </span>
+              <div className="text-[9px] text-[var(--slate-400)]">
+                {fmtDetailed(v.unit)} × {fmtDetailed(v.qty)}
+              </div>
+              {delta !== null && deltaPct !== null && (
+                <div
+                  className={`text-[9px] font-medium ${
+                    delta > 0
+                      ? "text-red-500"
+                      : delta < 0
+                      ? "text-green-600"
+                      : "text-[var(--slate-400)]"
+                  }`}
+                >
+                  {delta >= 0 ? "+" : ""}{fmtDetailed(delta)} ({delta >= 0 ? "+" : ""}{deltaPct.toFixed(1)}%)
+                </div>
+              )}
+            </td>
+          );
+        })}
+      </tr>
+      {typeof document !== "undefined" && tooltip &&
+        createPortal(
+          <SectionItemTooltip
+            item={item}
+            versions={allVersions}
+            hiddenVersionIdxs={hiddenVersionIdxs}
+            skipZero={skipZero}
+            x={tooltip.x}
+            y={tooltip.y}
+            onEnter={() => {
+              if (tooltipTimerRef.current) clearTimeout(tooltipTimerRef.current);
+            }}
+            onLeave={() => {
+              tooltipTimerRef.current = setTimeout(() => setTooltip(null), 160);
+            }}
+          />,
+          document.body,
+        )}
+    </>
   );
 }
 
@@ -815,7 +1446,6 @@ function ItemDetailTooltip({
 // ---- Variance Analysis View (price outlier detection) ----
 
 type VarianceMode = "percentage" | "absolute" | "total";
-type PriceField = "combined" | "material" | "fee";
 
 interface ItemVariance {
   item: MultiVersionItemEntry;

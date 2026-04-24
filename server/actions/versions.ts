@@ -706,6 +706,7 @@ export interface MultiVersionItemEntry {
   name: string;
   unit: string;
   sectionName: string | null;
+  sectionCode: string | null;
   /** Per-version data: null means item doesn't exist in that version */
   perVersion: (MultiVersionItemPrice | null)[];
 }
@@ -839,6 +840,7 @@ export async function compareMultipleVersions(
         sectionName: representative.sectionCode
           ? sectionNameMap.get(representative.sectionCode) ?? null
           : null,
+        sectionCode: representative.sectionCode ?? null,
         perVersion,
       });
     }
