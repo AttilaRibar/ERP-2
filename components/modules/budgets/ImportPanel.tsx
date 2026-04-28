@@ -1035,9 +1035,16 @@ function PreviewStep({
       {allSkipped.length > 0 && (
         <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-[var(--slate-50)] border border-[var(--slate-200)]">
           <Info size={12} className="text-[var(--slate-400)] mt-0.5 shrink-0" />
-          <div className="text-[10px] text-[var(--slate-500)]">
-            <span className="font-medium">Kihagyott munkalapok:</span>{" "}
-            {allSkipped.join(", ")}
+          <div className="text-[10px] text-[var(--slate-500)] space-y-0.5">
+            <div className="font-medium">Kihagyott munkalapok:</div>
+            {loadedFiles
+              .filter((f) => f.parseResult.skippedSheets.length > 0)
+              .map((f) => (
+                <div key={f.id}>
+                  <span className="font-medium text-[var(--slate-600)]">{f.fileName}:</span>{" "}
+                  {f.parseResult.skippedSheets.join(", ")}
+                </div>
+              ))}
           </div>
         </div>
       )}
@@ -1056,13 +1063,22 @@ function PreviewStep({
             {showWarnings ? <ChevronDown size={12} className="text-amber-400" /> : <ChevronRight size={12} className="text-amber-400" />}
           </button>
           {showWarnings && (
-            <div className="max-h-40 overflow-y-auto border-t border-amber-200">
-              {allWarnings.map((w, i) => (
-                <div key={i} className="px-3 py-1.5 text-[10px] border-b border-amber-100 last:border-b-0">
-                  <span className="text-amber-600 font-mono">[{w.sheet} sor {w.row}]</span>{" "}
-                  <span className="text-amber-700">{w.message}</span>
-                </div>
-              ))}
+            <div className="max-h-60 overflow-y-auto border-t border-amber-200">
+              {loadedFiles
+                .filter((f) => f.parseResult.warnings.length > 0)
+                .map((f) => (
+                  <div key={f.id} className="border-b border-amber-100 last:border-b-0">
+                    <div className="px-3 py-1.5 bg-amber-50/60 text-[10px] font-medium text-amber-800 sticky top-0">
+                      {f.fileName} <span className="text-amber-600 font-normal">({f.parseResult.warnings.length})</span>
+                    </div>
+                    {f.parseResult.warnings.map((w, i) => (
+                      <div key={i} className="px-3 py-1 text-[10px] border-t border-amber-100/70">
+                        <span className="text-amber-600 font-mono">[{w.sheet} sor {w.row}]</span>{" "}
+                        <span className="text-amber-700">{w.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
             </div>
           )}
         </div>
