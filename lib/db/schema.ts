@@ -8,11 +8,17 @@ import {
   numeric,
   boolean,
   uuid,
+  jsonb,
   index,
   uniqueIndex,
   check,
 } from "drizzle-orm/pg-core";
 import { sql, relations } from "drizzle-orm";
+import type {
+  AiChatAttachment,
+  LinkedContent,
+  ProposedAction,
+} from "@/types/ai-chat";
 
 // ============================================================
 // 1. PARTNERS (Partnerek)
@@ -472,5 +478,162 @@ export const savedComparisonsRelations = relations(savedComparisons, ({ one }) =
   budget: one(budgets, {
     fields: [savedComparisons.budgetId],
     references: [budgets.id],
+  }),
+}));
+
+// ============================================================
+// 14. AGENT PROPOSALS (Agent jóváhagyási javaslatok)
+// ============================================================
+export const agentProposals = pgTable(
+  "agent_proposals",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    kind: text("kind").notNull(),
+    status: text("status").notNull().default("draft"),
+    title: text("title").notNull(),
+    summary: text("summary").notNull().default(""),
+    context: jsonb("context").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    stats: jsonb("stats").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    warnings: jsonb("warnings").$type<Record<string, unknown>[]>().notNull().default(sql`'[]'::jsonb`),
+    requiredPermissions: jsonb("required_permissions").$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+    createdBy: text("created_by").notNull(),
+    approvedBy: text("approved_by"),
+    executedBy: text("executed_by"),
+    sourceAgent: text("source_agent").notNull(),
+    agentSessionId: text("agent_session_id"),
+    proposalHash: text("proposal_hash").notNull(),
+    failureReason: text("failure_reason"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull().default(sql`NOW() + INTERVAL '30 minutes'`),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+    approvedAt: timestamp("approved_at", { withTimezone: true }),
+    executedAt: timestamp("executed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_agent_proposals_created_by").on(t.createdBy),
+    index("idx_agent_proposals_status").on(t.status),
+    index("idx_agent_proposals_session").on(t.agentSessionId),
+    index("idx_agent_proposals_created_at").on(t.createdAt),
+    check("agent_proposals_kind_check", sql`${t.kind} IN ('chat_action', 'budget_import', 'budget_bulk_edit', 'item_bulk_edit', 'report_spec', 'comparison_spec')`),
+    check("agent_proposals_status_check", sql`${t.status} IN ('draft', 'approved', 'executing', 'executed', 'rejected', 'expired', 'failed')`),
+  ]
+);
+
+export const agentProposalOperations = pgTable(
+  "agent_proposal_operations",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    proposalId: bigint("proposal_id", { mode: "number" })
+      .notNull()
+      .references(() => agentProposals.id, { onDelete: "cascade" }),
+    sortOrder: integer("sort_order").notNull().default(0),
+    entityType: text("entity_type").notNull(),
+    operationType: text("operation_type").notNull(),
+    entityId: text("entity_id"),
+    beforeSnapshot: jsonb("before_snapshot").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    afterSnapshot: jsonb("after_snapshot").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    commandPayload: jsonb("command_payload").$type<Record<string, unknown>>().notNull().default(sql`'{}'::jsonb`),
+    status: text("status").notNull().default("pending"),
+    warningLevel: text("warning_level").notNull().default("none"),
+    conflictReason: text("conflict_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index("idx_agent_proposal_operations_proposal").on(t.proposalId, t.sortOrder),
+    index("idx_agent_proposal_operations_status").on(t.status),
+    index("idx_agent_proposal_operations_entity").on(t.entityType, t.entityId),
+    check("agent_proposal_operations_type_check", sql`${t.operationType} IN ('create', 'update', 'delete', 'create_version', 'create_report', 'create_comparison')`),
+    check("agent_proposal_operations_status_check", sql`${t.status} IN ('pending', 'approved', 'applied', 'skipped', 'failed', 'conflict')`),
+    check("agent_proposal_operations_warning_check", sql`${t.warningLevel} IN ('none', 'info', 'warning', 'critical')`),
+  ]
+);
+
+export const agentRuns = pgTable(
+  "agent_runs",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    userId: text("user_id").notNull(),
+    sessionId: text("session_id").notNull(),
+    agentName: text("agent_name").notNull(),
+    model: text("model").notNull(),
+    status: text("status").notNull().default("running"),
+    inputSummary: text("input_summary").notNull().default(""),
+    outputSummary: text("output_summary").notNull().default(""),
+    errorMessage: text("error_message"),
+    startedAt: timestamp("started_at", { withTimezone: true }).defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_agent_runs_user_session").on(t.userId, t.sessionId),
+    index("idx_agent_runs_started_at").on(t.startedAt),
+    check("agent_runs_status_check", sql`${t.status} IN ('running', 'succeeded', 'failed')`),
+  ]
+);
+
+// ============================================================
+// 15. AI CHAT SESSIONS (Mentett AI beszélgetések)
+// ============================================================
+export const aiChatSessions = pgTable(
+  "ai_chat_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id").notNull(),
+    title: text("title").notNull().default("Új beszélgetés"),
+    lastMessagePreview: text("last_message_preview").notNull().default(""),
+    messageCount: integer("message_count").notNull().default(0),
+    webSearchEnabled: boolean("web_search_enabled").notNull().default(false),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    lastMessageAt: timestamp("last_message_at", { withTimezone: true }).notNull().defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("idx_ai_chat_sessions_user_updated").on(t.userId, t.updatedAt),
+    index("idx_ai_chat_sessions_user_last_message").on(t.userId, t.lastMessageAt),
+  ],
+);
+
+export const aiChatMessages = pgTable(
+  "ai_chat_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => aiChatSessions.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull(),
+    role: text("role").notNull(),
+    content: text("content").notNull().default(""),
+    attachments: jsonb("attachments").$type<AiChatAttachment[]>().notNull().default(sql`'[]'::jsonb`),
+    linkedContents: jsonb("linked_contents").$type<LinkedContent[]>().notNull().default(sql`'[]'::jsonb`),
+    proposedActions: jsonb("proposed_actions").$type<ProposedAction[]>().notNull().default(sql`'[]'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("idx_ai_chat_messages_session_created").on(t.sessionId, t.createdAt),
+    index("idx_ai_chat_messages_user_session").on(t.userId, t.sessionId),
+    check("ai_chat_messages_role_check", sql`${t.role} IN ('user', 'assistant')`),
+  ],
+);
+
+export const aiChatSessionsRelations = relations(aiChatSessions, ({ many }) => ({
+  messages: many(aiChatMessages),
+}));
+
+export const aiChatMessagesRelations = relations(aiChatMessages, ({ one }) => ({
+  session: one(aiChatSessions, {
+    fields: [aiChatMessages.sessionId],
+    references: [aiChatSessions.id],
+  }),
+}));
+
+export const agentProposalsRelations = relations(agentProposals, ({ many }) => ({
+  operations: many(agentProposalOperations),
+}));
+
+export const agentProposalOperationsRelations = relations(agentProposalOperations, ({ one }) => ({
+  proposal: one(agentProposals, {
+    fields: [agentProposalOperations.proposalId],
+    references: [agentProposals.id],
   }),
 }));

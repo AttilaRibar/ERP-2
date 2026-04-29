@@ -23,6 +23,7 @@ import { SettlementSetup } from "@/components/modules/settlements/SettlementSetu
 import { SettlementManager } from "@/components/modules/settlements/SettlementManager";
 import { SettlementReview } from "@/components/modules/settlements/SettlementReview";
 import { ItemSearch } from "@/components/modules/items/ItemSearch";
+import { PricingWorkspace } from "@/components/modules/pricing/PricingWorkspace";
 import { FolderKanban } from "lucide-react";
 
 export function TabContent() {
@@ -174,6 +175,8 @@ export function TabContent() {
       return <AiAssistant />;
     case "items":
       return <ItemSearch />;
+    case "pricing":
+      return <PricingWorkspace />;
     default:
       return (
         <div className="flex-1 flex items-center justify-center bg-white">

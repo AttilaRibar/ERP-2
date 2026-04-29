@@ -1,10 +1,19 @@
 "use server";
 
 import { db } from "@/lib/db";
-import { partners, projects, quotes, budgets } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
+import {
+  agentProposalOperations,
+  agentProposals,
+  partners,
+  projects,
+  quotes,
+  budgets,
+} from "@/lib/db/schema";
+import { and, asc, eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
+import { getCurrentUser } from "@/lib/auth/session";
+import { requirePermission } from "@/lib/auth/permissions";
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -209,6 +218,138 @@ async function handleBudget(
   return { success: false, error: "Ismeretlen művelet típus" };
 }
 
+function proposalOperationToActionType(operationType: string): "create" | "modify" | "delete" | null {
+  if (operationType === "create") return "create";
+  if (operationType === "update") return "modify";
+  if (operationType === "delete") return "delete";
+  return null;
+}
+
+function readProposalId(entityId: number | null, payload: Record<string, unknown>): number | null {
+  if (entityId) return entityId;
+  const fromPayload = payload.proposalId;
+  return typeof fromPayload === "number" && Number.isInteger(fromPayload) ? fromPayload : null;
+}
+
+async function handleAgentProposal(
+  actionType: string,
+  entityId: number | null,
+  payload: Record<string, unknown>,
+): Promise<ExecuteActionResult> {
+  if (actionType !== "modify") {
+    return { success: false, error: "Agent javaslatot csak jóváhagyni lehet" };
+  }
+
+  await requirePermission("agent-proposals:execute");
+  const session = await getCurrentUser();
+  if (!session) return { success: false, error: "Nincs bejelentkezett felhasználó" };
+
+  const proposalId = readProposalId(entityId, payload);
+  if (!proposalId) return { success: false, error: "Hiányzó agent javaslat azonosító" };
+
+  const [proposal] = await db
+    .select()
+    .from(agentProposals)
+    .where(
+      and(
+        eq(agentProposals.id, proposalId),
+        eq(agentProposals.createdBy, session.user.sub),
+      ),
+    );
+
+  if (!proposal) return { success: false, error: "Agent javaslat nem található" };
+  if (proposal.status !== "draft" && proposal.status !== "approved") {
+    return { success: false, error: `A javaslat nem végrehajtható állapotban van: ${proposal.status}` };
+  }
+  if (proposal.expiresAt && proposal.expiresAt.getTime() < Date.now()) {
+    await db.update(agentProposals).set({ status: "expired", updatedAt: new Date() }).where(eq(agentProposals.id, proposal.id));
+    return { success: false, error: "A javaslat lejárt" };
+  }
+
+  for (const permission of proposal.requiredPermissions) {
+    await requirePermission(permission);
+  }
+
+  const operations = await db
+    .select()
+    .from(agentProposalOperations)
+    .where(eq(agentProposalOperations.proposalId, proposal.id))
+    .orderBy(asc(agentProposalOperations.sortOrder));
+
+  if (operations.length === 0) {
+    return { success: false, error: "A javaslat nem tartalmaz végrehajtható műveletet" };
+  }
+
+  await db
+    .update(agentProposals)
+    .set({
+      status: "executing",
+      approvedBy: session.user.sub,
+      executedBy: session.user.sub,
+      approvedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(agentProposals.id, proposal.id));
+
+  const errors: string[] = [];
+
+  for (const operation of operations) {
+    const handler = ENTITY_HANDLERS[operation.entityType];
+    const mappedActionType = proposalOperationToActionType(operation.operationType);
+
+    if (!handler || !mappedActionType) {
+      const error = `Nem támogatott proposal művelet: ${operation.entityType}/${operation.operationType}`;
+      errors.push(error);
+      await db
+        .update(agentProposalOperations)
+        .set({ status: "failed", conflictReason: error, updatedAt: new Date() })
+        .where(eq(agentProposalOperations.id, operation.id));
+      continue;
+    }
+
+    const numericEntityId = operation.entityId === null ? null : Number(operation.entityId);
+    if (operation.entityId !== null && !Number.isFinite(numericEntityId)) {
+      const error = `Érvénytelen entitás azonosító: ${operation.entityId}`;
+      errors.push(error);
+      await db
+        .update(agentProposalOperations)
+        .set({ status: "failed", conflictReason: error, updatedAt: new Date() })
+        .where(eq(agentProposalOperations.id, operation.id));
+      continue;
+    }
+
+    const operationPayload = mappedActionType === "delete" ? {} : operation.afterSnapshot;
+    const result = await handler(mappedActionType, numericEntityId, operationPayload);
+
+    await db
+      .update(agentProposalOperations)
+      .set({
+        status: result.success ? "applied" : "failed",
+        conflictReason: result.success ? null : (result.error ?? "Ismeretlen hiba"),
+        updatedAt: new Date(),
+      })
+      .where(eq(agentProposalOperations.id, operation.id));
+
+    if (!result.success) {
+      errors.push(result.error ?? "Ismeretlen hiba");
+    }
+  }
+
+  await db
+    .update(agentProposals)
+    .set({
+      status: errors.length === 0 ? "executed" : "failed",
+      failureReason: errors.length === 0 ? null : errors.join("; "),
+      executedAt: new Date(),
+      updatedAt: new Date(),
+    })
+    .where(eq(agentProposals.id, proposal.id));
+
+  return errors.length === 0
+    ? { success: true }
+    : { success: false, error: errors.join("; ") };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Router                                                             */
 /* ------------------------------------------------------------------ */
@@ -221,6 +362,7 @@ const ENTITY_HANDLERS: Record<
   project: handleProject,
   quote: handleQuote,
   budget: handleBudget,
+  agent_proposal: handleAgentProposal,
 };
 
 /**
