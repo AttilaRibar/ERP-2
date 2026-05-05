@@ -245,6 +245,9 @@ function ItemDetailPanel({
                 Verzió
               </th>
               <th className="text-left px-3 py-2 text-[var(--slate-500)] font-medium whitespace-nowrap">
+                Kategória / alkategória
+              </th>
+              <th className="text-left px-3 py-2 text-[var(--slate-500)] font-medium whitespace-nowrap">
                 Alvállalkozó
               </th>
               <th className="text-right px-3 py-2 text-[var(--slate-500)] font-medium whitespace-nowrap">
@@ -294,6 +297,18 @@ function ItemDetailPanel({
                   <div className="text-[10px] text-[var(--slate-400)]">
                     {VERSION_TYPE_LABEL[occ.versionType] ?? occ.versionType}
                   </div>
+                </td>
+                <td className="px-3 py-2">
+                  {occ.sectionPath ? (
+                    <div
+                      className="max-w-[180px] truncate text-[11px] text-[var(--slate-600)] cursor-help"
+                      title={occ.sectionPath}
+                    >
+                      {occ.sectionPath}
+                    </div>
+                  ) : (
+                    <span className="text-[var(--slate-300)]">-</span>
+                  )}
                 </td>
                 <td className="px-3 py-2">
                   {occ.partnerName ? (
@@ -639,7 +654,7 @@ export function ItemSearch() {
                   <span className="ml-1">
                     —{" "}
                     <span className="font-medium text-[var(--indigo-600)]">
-                      „{committedQuery}"
+                      „{committedQuery}”
                     </span>
                   </span>
                 )}
@@ -664,7 +679,7 @@ export function ItemSearch() {
               <div className="flex flex-col items-center justify-center py-16 gap-2">
                 <Search size={32} className="text-[var(--slate-200)]" />
                 <p className="text-sm text-[var(--slate-400)]">
-                  Nincs találat — „{committedQuery}"
+                  Nincs találat — „{committedQuery}”
                 </p>
                 <p className="text-xs text-[var(--slate-300)]">
                   Próbálja kevesebb karakterrel vagy más szóval

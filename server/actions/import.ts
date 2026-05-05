@@ -12,6 +12,7 @@ import type {
   ReconstructedSection,
 } from "./versions";
 import { getVersionItems, getVersionSections, getPartnersForVersionSelect } from "./versions";
+import type { VersionImportIssues } from "@/types/import-issues";
 
 export { getPartnersForVersionSelect };
 
@@ -23,6 +24,23 @@ export interface ImportVersionInput {
   partnerId: number | null;
   sections: SectionInput[];
   items: BudgetItemInput[];
+  importIssues?: VersionImportIssues | null;
+}
+
+function normalizeImportIssues(
+  issues: VersionImportIssues | null | undefined,
+): VersionImportIssues | null {
+  if (!issues) return null;
+  const normalized: VersionImportIssues = {
+    readErrors: issues.readErrors ?? [],
+    formulaErrors: issues.formulaErrors ?? [],
+    contentErrors: issues.contentErrors ?? [],
+  };
+  const total =
+    normalized.readErrors.length +
+    normalized.formulaErrors.length +
+    normalized.contentErrors.length;
+  return total > 0 ? normalized : null;
 }
 
 // ---- Smart matching helpers ----
@@ -345,7 +363,20 @@ export async function importVersionWithItems(
     return { success: false, error: "Nincsenek importálható tételek" };
   }
 
+  if (parentId) {
+    const [parentVersion] = await db
+      .select({ budgetId: versions.budgetId })
+      .from(versions)
+      .where(eq(versions.id, parentId));
+
+    if (!parentVersion || parentVersion.budgetId !== budgetId) {
+      return { success: false, error: "A szülő verzió nem ehhez a költségvetéshez tartozik" };
+    }
+  }
+
   try {
+    const importIssues = normalizeImportIssues(input.importIssues);
+
     // Create version
     const [created] = await db
       .insert(versions)
@@ -355,6 +386,7 @@ export async function importVersionWithItems(
         versionName: versionName.trim(),
         versionType,
         partnerId,
+        importIssues,
       })
       .returning();
 
@@ -430,6 +462,7 @@ export async function importVersionWithItems(
         partnerName,
         originalFileName: created.originalFileName ?? null,
         originalFilePath: created.originalFilePath ?? null,
+        importIssues: (created.importIssues as VersionImportIssues | null) ?? null,
         notes: created.notes ?? null,
         createdAt: created.createdAt,
         hasChildren: false,

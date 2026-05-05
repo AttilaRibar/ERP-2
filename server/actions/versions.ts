@@ -2,12 +2,37 @@
 
 import { db } from "@/lib/db";
 import { versions, budgetItems, budgetSections, partners } from "@/lib/db/schema";
+import { requirePermission } from "@/lib/auth/permissions";
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
+import type { VersionImportIssues } from "@/types/import-issues";
 
 // ---- Types ----
 
 export type VersionType = "offer" | "contracted" | "unpriced";
+
+export type PriceScalingMode = "target-total" | "total-percent" | "material-fee-multiplier";
+
+export interface CreateScaledVersionInput {
+  versionName: string;
+  mode: PriceScalingMode;
+  targetTotal?: number;
+  reductionPercent?: number;
+  materialMultiplier?: number;
+  feeMultiplier?: number;
+}
+
+export interface ScaledVersionSummary {
+  sourceMaterialTotal: number;
+  sourceFeeTotal: number;
+  sourceGrandTotal: number;
+  materialMultiplier: number;
+  feeMultiplier: number;
+  projectedMaterialTotal: number;
+  projectedFeeTotal: number;
+  projectedGrandTotal: number;
+  roundingDelta: number;
+}
 
 export interface VersionInfo {
   id: number;
@@ -19,6 +44,7 @@ export interface VersionInfo {
   partnerName: string | null;
   originalFileName: string | null;
   originalFilePath: string | null;
+  importIssues: VersionImportIssues | null;
   notes: string | null;
   createdAt: Date | null;
   hasChildren: boolean;
@@ -112,6 +138,13 @@ export interface ComparisonResult {
   notesB: string | null;
 }
 
+export interface CreateScaledVersionResult {
+  success: boolean;
+  data?: VersionInfo;
+  summary?: ScaledVersionSummary;
+  error?: string;
+}
+
 // ---- Queries ----
 
 export async function getVersionsByBudgetId(budgetId: number): Promise<VersionInfo[]> {
@@ -126,6 +159,7 @@ export async function getVersionsByBudgetId(budgetId: number): Promise<VersionIn
       partnerName: partners.name,
       originalFileName: versions.originalFileName,
       originalFilePath: versions.originalFilePath,
+      importIssues: versions.importIssues,
       notes: versions.notes,
       createdAt: versions.createdAt,
     })
@@ -274,6 +308,93 @@ function buildSectionTotals(
 // ---- Mutations ----
 
 const VersionNameSchema = z.string().min(1, "A verzió neve kötelező").max(100);
+
+const NonNegativeNumberSchema = z.coerce
+  .number()
+  .refine((value) => Number.isFinite(value), "Érvénytelen szám")
+  .min(0, "Negatív érték nem adható meg");
+
+const CreateScaledVersionSchema = z.discriminatedUnion("mode", [
+  z.object({
+    versionName: VersionNameSchema,
+    mode: z.literal("target-total"),
+    targetTotal: NonNegativeNumberSchema,
+  }),
+  z.object({
+    versionName: VersionNameSchema,
+    mode: z.literal("total-percent"),
+    reductionPercent: NonNegativeNumberSchema.max(100, "A csökkentés legfeljebb 100% lehet"),
+  }),
+  z.object({
+    versionName: VersionNameSchema,
+    mode: z.literal("material-fee-multiplier"),
+    materialMultiplier: NonNegativeNumberSchema,
+    feeMultiplier: NonNegativeNumberSchema,
+  }),
+]);
+
+function roundUnitPrice(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function calculateItemTotals(items: BudgetItemInput[] | ReconstructedItem[]) {
+  return items.reduce(
+    (totals, item) => {
+      totals.material += item.quantity * item.materialUnitPrice;
+      totals.fee += item.quantity * item.feeUnitPrice;
+      return totals;
+    },
+    { material: 0, fee: 0 }
+  );
+}
+
+function scaleItems(
+  items: ReconstructedItem[],
+  materialMultiplier: number,
+  feeMultiplier: number
+): BudgetItemInput[] {
+  return items.map((item) => ({
+    itemCode: item.itemCode,
+    sequenceNo: item.sequenceNo,
+    itemNumber: item.itemNumber,
+    name: item.name,
+    quantity: item.quantity,
+    unit: item.unit,
+    materialUnitPrice: roundUnitPrice(item.materialUnitPrice * materialMultiplier),
+    feeUnitPrice: roundUnitPrice(item.feeUnitPrice * feeMultiplier),
+    notes: item.notes,
+    sectionCode: item.sectionCode,
+    alternativeOfItemCode: item.alternativeOfItemCode,
+  }));
+}
+
+function resolveScalingMultipliers(
+  input: z.infer<typeof CreateScaledVersionSchema>,
+  sourceGrandTotal: number
+): { success: true; materialMultiplier: number; feeMultiplier: number } | { success: false; error: string } {
+  if (input.mode === "target-total") {
+    if (sourceGrandTotal <= 0) {
+      return {
+        success: false,
+        error: "Nulla forrás végösszegből nem számolható célösszeg alapú szorzó",
+      };
+    }
+
+    const multiplier = input.targetTotal / sourceGrandTotal;
+    return { success: true, materialMultiplier: multiplier, feeMultiplier: multiplier };
+  }
+
+  if (input.mode === "total-percent") {
+    const multiplier = (100 - input.reductionPercent) / 100;
+    return { success: true, materialMultiplier: multiplier, feeMultiplier: multiplier };
+  }
+
+  return {
+    success: true,
+    materialMultiplier: input.materialMultiplier,
+    feeMultiplier: input.feeMultiplier,
+  };
+}
 
 export async function getPartnersForVersionSelect() {
   return db
@@ -569,6 +690,133 @@ export async function saveItemsAsNewVersion(
   return {
     success: true,
     data: { ...created, versionType: created.versionType as VersionType, partnerName, hasChildren: false },
+  };
+}
+
+/**
+ * Creates a child budget version by scaling the reconstructed source version's
+ * material and fee unit prices. The scaling parameters are intentionally not
+ * persisted; only the resulting item-price deltas are stored in the new version.
+ */
+export async function createScaledBudgetVersion(
+  sourceVersionId: number,
+  input: CreateScaledVersionInput
+): Promise<CreateScaledVersionResult> {
+  try {
+    await requirePermission("versions:write");
+    await requirePermission("budget-items:write");
+  } catch {
+    return { success: false, error: "Nincs jogosultság új verzió létrehozásához" };
+  }
+
+  const parsed = CreateScaledVersionSchema.safeParse(input);
+  if (!parsed.success) {
+    return { success: false, error: parsed.error.issues[0]?.message ?? "Érvénytelen adatok" };
+  }
+
+  const [sourceVersion] = await db
+    .select()
+    .from(versions)
+    .where(eq(versions.id, sourceVersionId));
+  if (!sourceVersion) return { success: false, error: "Forrás verzió nem található" };
+
+  const [sourceItems, sourceSections] = await Promise.all([
+    getVersionItems(sourceVersionId),
+    getVersionSections(sourceVersionId),
+  ]);
+
+  const sourceTotals = calculateItemTotals(sourceItems);
+  const sourceGrandTotal = sourceTotals.material + sourceTotals.fee;
+  const multipliers = resolveScalingMultipliers(parsed.data, sourceGrandTotal);
+  if (!multipliers.success) return multipliers;
+
+  const scaledItems = scaleItems(
+    sourceItems,
+    multipliers.materialMultiplier,
+    multipliers.feeMultiplier
+  );
+  const projectedTotals = calculateItemTotals(scaledItems);
+  const projectedGrandTotal = projectedTotals.material + projectedTotals.fee;
+  const deltaItems = computeDelta(sourceItems, scaledItems);
+  const deltaSections = computeSectionDelta(sourceSections, sourceSections);
+  const targetTotal = parsed.data.mode === "target-total" ? parsed.data.targetTotal : projectedGrandTotal;
+
+  const created = await db.transaction(async (tx) => {
+    const [newVersion] = await tx
+      .insert(versions)
+      .values({
+        budgetId: sourceVersion.budgetId,
+        parentId: sourceVersionId,
+        versionName: parsed.data.versionName,
+        versionType: sourceVersion.versionType,
+        partnerId: sourceVersion.partnerId,
+      })
+      .returning();
+
+    if (deltaItems.length > 0) {
+      await tx.insert(budgetItems).values(
+        deltaItems.map((item) => ({
+          versionId: newVersion.id,
+          itemCode: item.itemCode,
+          sequenceNo: item.sequenceNo,
+          itemNumber: item.itemNumber,
+          name: item.name,
+          quantity: String(item.quantity),
+          unit: item.unit,
+          materialUnitPrice: String(item.materialUnitPrice),
+          feeUnitPrice: String(item.feeUnitPrice),
+          notes: item.notes,
+          sectionCode: item.sectionCode ?? null,
+          alternativeOfItemCode: item.alternativeOfItemCode ?? null,
+          isDeleted: item.isDeleted,
+        }))
+      );
+    }
+
+    if (deltaSections.length > 0) {
+      await tx.insert(budgetSections).values(
+        deltaSections.map((section) => ({
+          versionId: newVersion.id,
+          sectionCode: section.sectionCode,
+          parentSectionCode: section.parentSectionCode ?? null,
+          name: section.name,
+          sequenceNo: section.sequenceNo,
+          isDeleted: section.isDeleted,
+        }))
+      );
+    }
+
+    return newVersion;
+  });
+
+  let partnerName: string | null = null;
+  if (created.partnerId) {
+    const [partner] = await db
+      .select({ name: partners.name })
+      .from(partners)
+      .where(eq(partners.id, created.partnerId));
+    partnerName = partner?.name ?? null;
+  }
+
+  return {
+    success: true,
+    data: {
+      ...created,
+      versionType: created.versionType as VersionType,
+      partnerName,
+      hasChildren: false,
+    },
+    summary: {
+      sourceMaterialTotal: sourceTotals.material,
+      sourceFeeTotal: sourceTotals.fee,
+      sourceGrandTotal,
+      materialMultiplier: multipliers.materialMultiplier,
+      feeMultiplier: multipliers.feeMultiplier,
+      projectedMaterialTotal: projectedTotals.material,
+      projectedFeeTotal: projectedTotals.fee,
+      projectedGrandTotal,
+      roundingDelta: targetTotal - projectedGrandTotal,
+    },
   };
 }
 

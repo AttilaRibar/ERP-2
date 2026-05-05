@@ -1,21 +1,39 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth/session";
-import { invokeBedrockAgent } from "@/lib/aws/bedrock";
+import { invokeErpChatAgent } from "@/lib/agent/agents/chat-agent";
+import {
+  createSessionTitle,
+  ensureAiChatSession,
+  getAiChatSessionForUser,
+  insertAiChatMessageForUser,
+  loadAgentHistoryForUser,
+} from "@/lib/agent/chat-persistence";
+import {
+  processAgentFileAttachments,
+  toStoredAttachment,
+} from "@/lib/agent/file-attachments";
+import { requirePermission } from "@/lib/auth/permissions";
 import { z } from "zod";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 /* ------------------------------------------------------------------ */
 /*  Request validation                                                 */
 /* ------------------------------------------------------------------ */
 
 const RequestSchema = z.object({
-  message: z.string().min(1).max(10_000),
-  sessionId: z.string().min(1).max(200),
+  message: z.string().max(10_000).default(""),
+  sessionId: z.string().uuid(),
+  clientMessageId: z.string().uuid().optional(),
+  webSearchEnabled: z.boolean().default(false),
   files: z
     .array(
       z.object({
-        name: z.string(),
-        mediaType: z.string(),
-        base64: z.string(),
+        name: z.string().min(1).max(255),
+        mediaType: z.string().min(1).max(180),
+        size: z.number().int().min(0).max(5 * 1024 * 1024),
+        base64: z.string().min(1).max(8_000_000),
       }),
     )
     .max(5)
@@ -23,7 +41,7 @@ const RequestSchema = z.object({
 });
 
 /* ------------------------------------------------------------------ */
-/*  POST /api/ai — Streaming SSE endpoint                             */
+/*  POST /api/ai — persisted non-streaming chat turn                   */
 /* ------------------------------------------------------------------ */
 
 export async function POST(req: NextRequest) {
@@ -31,6 +49,12 @@ export async function POST(req: NextRequest) {
   const session = await getCurrentUser();
   if (!session) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  try {
+    await requirePermission("ai-chat:write");
+  } catch {
+    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
   /* --- Parse & validate body --- */
@@ -49,142 +73,96 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { message, sessionId, files } = parsed.data;
+  const { clientMessageId, files, sessionId, webSearchEnabled } = parsed.data;
+  const message = parsed.data.message.trim();
+  if (!message && (!files || files.length === 0)) {
+    return NextResponse.json({ error: "Message or file is required" }, { status: 400 });
+  }
 
-  /* --- Streaming response via SSE --- */
-  const encoder = new TextEncoder();
+  if (webSearchEnabled) {
+    try {
+      await requirePermission("internet-search:use");
+    } catch {
+      return NextResponse.json({ error: "Internet search is not allowed" }, { status: 403 });
+    }
+  }
 
-  const stream = new ReadableStream({
-    async start(controller) {
-      function sendEvent(event: string, data: unknown) {
-        controller.enqueue(
-          encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`),
-        );
-      }
+  const userId = session.user.sub;
+  const processedFiles = await processAgentFileAttachments(files ?? [], {
+    userId,
+    sessionId,
+  });
+  const storedAttachments = processedFiles.map(toStoredAttachment);
+  const sessionBeforeTurn = await ensureAiChatSession({
+    userId,
+    sessionId,
+    webSearchEnabled,
+  });
+  const history = await loadAgentHistoryForUser({ userId, sessionId, limit: 16 });
 
-      try {
-        const response = await invokeBedrockAgent({
-          message,
-          sessionId,
-          idToken: session.idToken,
-          files,
-        });
-
-        if (!response.completion) {
-          sendEvent("error", { message: "No completion stream returned" });
-          controller.close();
-          return;
-        }
-
-        for await (const event of response.completion) {
-          if (event.chunk) {
-            const text = new TextDecoder().decode(event.chunk.bytes);
-            sendEvent("chunk", { text });
-          }
-
-          if (event.returnControl) {
-            sendEvent("returnControl", {
-              invocationId: event.returnControl.invocationId,
-              invocationInputs: event.returnControl.invocationInputs,
-            });
-          }
-
-          if (event.trace?.trace) {
-            const t = event.trace.trace;
-
-            // Orchestration trace — rationale (agent thinking / reasoning)
-            if (t.orchestrationTrace?.rationale?.text) {
-              sendEvent("thinking", {
-                type: "rationale",
-                text: t.orchestrationTrace.rationale.text,
-              });
-            }
-
-            // Orchestration trace — model invocation input (prompt sent to LLM)
-            if (t.orchestrationTrace?.modelInvocationInput?.text) {
-              sendEvent("thinking", {
-                type: "modelInput",
-                text: t.orchestrationTrace.modelInvocationInput.text,
-              });
-            }
-
-            // Orchestration trace — invocation input (tool call)
-            if (t.orchestrationTrace?.invocationInput) {
-              const inv = t.orchestrationTrace.invocationInput;
-              sendEvent("thinking", {
-                type: "toolCall",
-                actionGroup: inv.actionGroupInvocationInput?.actionGroupName,
-                apiPath: inv.actionGroupInvocationInput?.apiPath,
-                function: inv.actionGroupInvocationInput?.function,
-                knowledgeBase: inv.knowledgeBaseLookupInput?.knowledgeBaseId,
-                query: inv.knowledgeBaseLookupInput?.text,
-                invocationType: inv.invocationType,
-              });
-            }
-
-            // Orchestration trace — observation (tool result)
-            if (t.orchestrationTrace?.observation) {
-              const obs = t.orchestrationTrace.observation;
-              const output =
-                obs.actionGroupInvocationOutput?.text ??
-                obs.knowledgeBaseLookupOutput?.retrievedReferences
-                  ?.map((r) => r.content?.text)
-                  .filter(Boolean)
-                  .join("\n")
-                  .slice(0, 500) ??
-                obs.finalResponse?.text;
-              if (output) {
-                sendEvent("thinking", {
-                  type: "observation",
-                  text: output,
-                  traceType: obs.type,
-                });
-              }
-            }
-
-            // Pre/Post processing traces
-            if (t.preProcessingTrace?.modelInvocationOutput?.parsedResponse) {
-              sendEvent("thinking", {
-                type: "preProcessing",
-                isValid: t.preProcessingTrace.modelInvocationOutput.parsedResponse.isValid,
-                rationale: t.preProcessingTrace.modelInvocationOutput.parsedResponse.rationale,
-              });
-            }
-
-            if (t.postProcessingTrace?.modelInvocationOutput?.parsedResponse?.text) {
-              sendEvent("thinking", {
-                type: "postProcessing",
-                text: t.postProcessingTrace.modelInvocationOutput.parsedResponse.text,
-              });
-            }
-
-            // Failure trace
-            if (t.failureTrace?.failureReason) {
-              sendEvent("thinking", {
-                type: "failure",
-                text: t.failureTrace.failureReason,
-              });
-            }
-          }
-        }
-
-        sendEvent("done", {});
-      } catch (err: unknown) {
-        const errorMessage =
-          err instanceof Error ? err.message : "Unknown error";
-        console.error("[api/ai] Bedrock agent error:", errorMessage);
-        sendEvent("error", { message: errorMessage });
-      } finally {
-        controller.close();
-      }
-    },
+  const userMessage = await insertAiChatMessageForUser({
+    id: clientMessageId,
+    userId,
+    sessionId,
+    role: "user",
+    content: message,
+    attachments: storedAttachments,
+    sessionTitle:
+      sessionBeforeTurn.messageCount === 0
+        ? createSessionTitle(message, storedAttachments)
+        : undefined,
   });
 
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
+  try {
+    const response = await invokeErpChatAgent({
+      message,
+      sessionId,
+      session,
+      attachments: processedFiles,
+      history,
+      allowWebSearch: webSearchEnabled,
+    });
+
+    const assistantAttachments = (response.outputAttachments ?? []).map((file) => ({
+      name: file.name,
+      size: file.size,
+      type: file.mediaType,
+      downloadId: file.attachmentId,
+    }));
+
+    const assistantMessage = await insertAiChatMessageForUser({
+      userId,
+      sessionId,
+      role: "assistant",
+      content: response.answer,
+      linkedContents: response.linkedContents,
+      proposedActions: response.proposedActions,
+      attachments: assistantAttachments.length > 0 ? assistantAttachments : undefined,
+    });
+
+    const updatedSession = await getAiChatSessionForUser(userId, sessionId);
+
+    return NextResponse.json({
+      session: updatedSession,
+      userMessage,
+      assistantMessage,
+      response,
+    });
+  } catch (err: unknown) {
+    const errorMessage = err instanceof Error ? err.message : "Unknown agent error";
+    console.error("[api/ai] LangGraph agent error:", errorMessage);
+
+    const assistantMessage = await insertAiChatMessageForUser({
+      userId,
+      sessionId,
+      role: "assistant",
+      content: `Hiba történt az agent futtatása közben: ${errorMessage}`,
+    });
+    const updatedSession = await getAiChatSessionForUser(userId, sessionId);
+
+    return NextResponse.json(
+      { error: errorMessage, session: updatedSession, userMessage, assistantMessage },
+      { status: 500 },
+    );
+  }
 }

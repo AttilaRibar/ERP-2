@@ -25,6 +25,10 @@ type DetailView =
 interface BudgetDetailProps {
   budgetId: number;
   tabId: string;
+  initialVersionId?: number;
+  initialVersionName?: string;
+  initialVersionType?: VersionType;
+  initialPartnerName?: string | null;
 }
 
 type BudgetData = {
@@ -36,20 +40,53 @@ type BudgetData = {
   createdAt: Date | null;
 };
 
-export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
-  const [view, setView] = useState<DetailView>({ type: "data" });
-  const [budget, setBudget] = useState<BudgetData | null>(null);
-  const [loading, setLoading] = useState(true);
+interface BudgetState {
+  budgetId: number;
+  data: BudgetData | null;
+}
+
+export function BudgetDetail({
+  budgetId,
+  tabId,
+  initialVersionId,
+  initialVersionName,
+  initialVersionType = "offer",
+  initialPartnerName = null,
+}: BudgetDetailProps) {
+  const [view, setView] = useState<DetailView>(() => (
+    initialVersionId && initialVersionName
+      ? {
+          type: "version-items",
+          versionId: initialVersionId,
+          versionName: initialVersionName,
+          versionType: initialVersionType,
+          partnerName: initialPartnerName,
+        }
+      : { type: "data" }
+  ));
+  const [budgetState, setBudgetState] = useState<BudgetState | null>(null);
+  const budget = budgetState?.budgetId === budgetId ? budgetState.data : null;
+  const loading = budgetState?.budgetId !== budgetId;
   const closeTab = useTabStore((s) => s.closeTab);
   const openTab = useTabStore((s) => s.openTab);
+  const updateTab = useTabStore((s) => s.updateTab);
 
   useEffect(() => {
-    setLoading(true);
+    let active = true;
     getBudgetById(budgetId).then((data) => {
-      setBudget(data);
-      setLoading(false);
+      if (!active) return;
+      setBudgetState({ budgetId, data });
+      if (data) {
+        updateTab(tabId, {
+          title: data.name,
+          subtitle: data.projectName ?? undefined,
+        });
+      }
     });
-  }, [budgetId]);
+    return () => {
+      active = false;
+    };
+  }, [budgetId, tabId, updateTab]);
 
   const goBack = () => {
     closeTab(tabId);
@@ -62,6 +99,7 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
       title: `Költségvetés szerkesztése #${budgetId}`,
       color: "#f59e0b",
       tabType: "edit",
+      subtitle: budget?.projectName ?? undefined,
       params: { budgetId },
     });
   };
@@ -73,8 +111,21 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
   };
 
   const handleOpenVersion = useCallback((versionId: number, versionName: string, versionType: VersionType = "offer", partnerName: string | null = null) => {
-    setView({ type: "version-items", versionId, versionName, versionType, partnerName });
-  }, []);
+    openTab({
+      moduleKey: "budgets-version",
+      title: versionName,
+      color: "#f59e0b",
+      tabType: "view",
+      subtitle: budget?.name ?? undefined,
+      params: {
+        budgetId,
+        versionId,
+        versionName,
+        versionType,
+        partnerName,
+      },
+    });
+  }, [budget?.name, budgetId, openTab]);
 
   const handleCompare = useCallback(
     (versionAId: number, versionBId: number, nameA: string, nameB: string) => {
@@ -101,10 +152,11 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
         title: name,
         color: "#f59e0b",
         tabType: "view",
+        subtitle: budget?.name ?? undefined,
         params: { budgetId, compareType, versionIds, versionNames, state },
       });
     },
-    [budgetId, openTab]
+    [budgetId, openTab, budget?.name]
   );
 
   const handleOpenSavedComparison = useCallback(
@@ -134,9 +186,34 @@ export function BudgetDetail({ budgetId, tabId }: BudgetDetailProps) {
   const activeSidebarKey =
     view.type === "version-items" || view.type === "comparison" || view.type === "multi-comparison" ? "versions" : view.type;
 
-  const handleImported = useCallback((versionId: number, versionName: string, versionType: VersionType, partnerName: string | null) => {
-    setView({ type: "version-items", versionId, versionName, versionType, partnerName });
-  }, []);
+  const handleImported = useCallback((
+    versionId: number,
+    versionName: string,
+    versionType: VersionType,
+    partnerName: string | null,
+    targetBudgetId: number,
+    targetBudgetName: string | null,
+  ) => {
+    if (targetBudgetId !== budgetId) {
+      openTab({
+        moduleKey: "budgets-version",
+        title: versionName,
+        color: "#f59e0b",
+        tabType: "view",
+        subtitle: targetBudgetName ?? `Költségvetés #${targetBudgetId}`,
+        params: {
+          budgetId: targetBudgetId,
+          versionId,
+          versionName,
+          versionType,
+          partnerName,
+        },
+      });
+      return;
+    }
+
+    handleOpenVersion(versionId, versionName, versionType, partnerName);
+  }, [budgetId, handleOpenVersion, openTab]);
 
   if (loading) {
     return (
