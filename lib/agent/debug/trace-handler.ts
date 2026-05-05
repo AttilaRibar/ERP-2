@@ -5,7 +5,7 @@ import type { LLMResult } from "@langchain/core/outputs";
 
 /**
  * Per-Mtok pricing (USD). Override via env so we can keep this in sync with
- * Anthropic price changes without code edits. Defaults match Claude Sonnet 4.5.
+ * the selected OpenRouter model without code edits. Defaults match Claude Sonnet 4.5.
  */
 const PRICING = {
   inputPerMtok: Number(process.env.AGENT_PRICE_INPUT_USD ?? 3),
@@ -115,10 +115,16 @@ function extractUsageFromLLMEnd(output: LLMResult): UsageBreakdown {
     return usage;
   }
 
-  // Fallback: llmOutput.usage (Anthropic raw shape).
+  // Fallback: llmOutput token usage from OpenAI-compatible or provider-native shapes.
   const llmOut = output.llmOutput as
     | {
+        tokenUsage?: {
+          promptTokens?: number;
+          completionTokens?: number;
+        };
         usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
           input_tokens?: number;
           output_tokens?: number;
           cache_read_input_tokens?: number;
@@ -127,11 +133,12 @@ function extractUsageFromLLMEnd(output: LLMResult): UsageBreakdown {
       }
     | undefined;
   const u = llmOut?.usage;
-  if (u) {
-    usage.inputTokens = u.input_tokens ?? 0;
-    usage.outputTokens = u.output_tokens ?? 0;
-    usage.cacheReadTokens = u.cache_read_input_tokens ?? 0;
-    usage.cacheWriteTokens = u.cache_creation_input_tokens ?? 0;
+  const tokenUsage = llmOut?.tokenUsage;
+  if (u || tokenUsage) {
+    usage.inputTokens = u?.input_tokens ?? u?.prompt_tokens ?? tokenUsage?.promptTokens ?? 0;
+    usage.outputTokens = u?.output_tokens ?? u?.completion_tokens ?? tokenUsage?.completionTokens ?? 0;
+    usage.cacheReadTokens = u?.cache_read_input_tokens ?? 0;
+    usage.cacheWriteTokens = u?.cache_creation_input_tokens ?? 0;
   }
   return usage;
 }

@@ -1,5 +1,6 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { createAnthropicModel } from "@/lib/agent/llm";
+import { createLangSmithRunConfig } from "@/lib/agent/langsmith";
+import { createOpenRouterModel } from "@/lib/agent/llm";
 import { CHANGE_AGENT_SYSTEM_PROMPT } from "@/lib/agent/prompts/change-agent.prompt";
 import {
   BulkChangePlanSchema,
@@ -21,6 +22,7 @@ export interface PlanBulkChangeInput {
 }
 
 const MAX_TOKENS = 2_000;
+const AGENT_NAME = "erp-bulk-change-planner";
 
 function buildUserMessage(input: PlanBulkChangeInput): string {
   return [
@@ -42,16 +44,28 @@ function buildUserMessage(input: PlanBulkChangeInput): string {
 export async function planBulkChange(
   input: PlanBulkChangeInput,
 ): Promise<BulkChangePlan> {
-  const model = createAnthropicModel({ temperature: 0, maxTokens: MAX_TOKENS });
+  const model = createOpenRouterModel({ temperature: 0, maxTokens: MAX_TOKENS });
   const structured = model.withStructuredOutput<BulkChangePlan>(
     BulkChangePlanSchema,
     { name: "BulkChangePlan" },
   );
 
-  const result = await structured.invoke([
-    new SystemMessage(CHANGE_AGENT_SYSTEM_PROMPT),
-    new HumanMessage(buildUserMessage(input)),
-  ]);
+  const result = await structured.invoke(
+    [
+      new SystemMessage(CHANGE_AGENT_SYSTEM_PROMPT),
+      new HumanMessage(buildUserMessage(input)),
+    ],
+    createLangSmithRunConfig({
+      runName: "erp-bulk-change-planner.change-plan",
+      agentName: AGENT_NAME,
+      tags: ["bulk-change", "structured-output"],
+      metadata: {
+        workflow: "bulk-change-plan",
+        field_count: input.availableFields.length,
+        scope_keys: Object.keys(input.scope),
+      },
+    }),
+  );
 
   return BulkChangePlanSchema.parse(result);
 }

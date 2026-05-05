@@ -25,19 +25,31 @@ export interface ParsedBudgetItem {
   mainCategory: string;
   /** Sub-category within the worksheet (e.g. "71 Elektromosenergia-ellátás") */
   subCategory: string | null;
+  /** Original worksheet before any import-time category wrapping. */
+  sourceSheet: string;
+  /** 1-based Excel row number. */
+  sourceRow: number;
+  /** Filled by the import UI when multiple files are merged. */
+  sourceFileName?: string;
 }
 
-/** Warning / skipped row info */
-export interface ParseWarning {
+/** Detailed parser diagnostic tied to a concrete Excel row. */
+export interface ParseIssue {
   sheet: string;
   row: number;
   message: string;
+  fileName?: string;
   rawData?: unknown[];
 }
+
+/** Backward-compatible alias for older import UI code paths. */
+export type ParseWarning = ParseIssue;
 
 /** Full result of parsing an Excel file */
 export interface ExcelParseResult {
   items: ParsedBudgetItem[];
+  readErrors: ParseIssue[];
+  formulaErrors: ParseIssue[];
   warnings: ParseWarning[];
   /** Sheets that were skipped (no items found) */
   skippedSheets: string[];
@@ -384,7 +396,8 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
 
   parse(workbook: XLSX.WorkBook): ExcelParseResult {
     const items: ParsedBudgetItem[] = [];
-    const warnings: ParseWarning[] = [];
+    const readErrors: ParseIssue[] = [];
+    const formulaErrors: ParseIssue[] = [];
     const skippedSheets: string[] = [];
     const sheetSummaries: SheetSummary[] = [];
 
@@ -473,7 +486,7 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
           // Warn when the stored Excel total disagrees significantly with the computed value
           // AND the unit price is non-zero (zero-priced items legitimately have 0 totals).
           if (hasNumericValue(matTotalCell) && matUnit !== 0 && Math.abs(computedMatTotal - matTotal) > 1) {
-            warnings.push({
+            formulaErrors.push({
               sheet: sheetName,
               row: rowIdx + 1,
               message: `Anyag összeg eltérés: számított ${computedMatTotal} vs Excel ${matTotal} (Excel érték használva)`,
@@ -481,7 +494,7 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
             });
           }
           if (hasNumericValue(feeTotalCell) && feeUnit !== 0 && Math.abs(computedFeeTotal - feeTotal) > 1) {
-            warnings.push({
+            formulaErrors.push({
               sheet: sheetName,
               row: rowIdx + 1,
               message: `Díj összeg eltérés: számított ${computedFeeTotal} vs Excel ${feeTotal} (Excel érték használva)`,
@@ -501,6 +514,8 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
             feeTotal: feeTotal,
             mainCategory: sheetName,
             subCategory: currentSubCategory,
+            sourceSheet: sheetName,
+            sourceRow: rowIdx + 1,
           });
 
           sheetItemCount++;
@@ -514,10 +529,10 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
           (c) => c !== "" && c !== null && c !== undefined
         );
         if (nonEmpty.length > 1) {
-          warnings.push({
+          readErrors.push({
             sheet: sheetName,
             row: rowIdx + 1,
-            message: "Nem felismerhető sor — kihagyva",
+            message: "Nem felismerhető sor: nem tétel, nem kategória és nem összesítő sor — kihagyva",
             rawData: row.slice(0, 9),
           });
         }
@@ -538,7 +553,9 @@ export class HungarianBudgetStrategy implements ExcelParseStrategy {
 
     return {
       items,
-      warnings,
+      readErrors,
+      formulaErrors,
+      warnings: [...readErrors, ...formulaErrors],
       skippedSheets,
       sheetSummaries,
       totals: {

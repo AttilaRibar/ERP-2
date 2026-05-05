@@ -19,6 +19,7 @@ import type {
   LinkedContent,
   ProposedAction,
 } from "@/types/ai-chat";
+import type { VersionImportIssues } from "@/types/import-issues";
 
 // ============================================================
 // 1. PARTNERS (Partnerek)
@@ -172,6 +173,7 @@ export const versions = pgTable(
     }),
     originalFileName: text("original_file_name"),
     originalFilePath: text("original_file_path"),
+    importIssues: jsonb("import_issues").$type<VersionImportIssues | null>(),
     notes: text("notes"),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
   },

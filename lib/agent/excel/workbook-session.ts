@@ -1,21 +1,8 @@
-/**
- * In-memory workbook session store for the AI agent's Excel toolset.
- *
- * Goals:
- * - Avoid re-parsing/re-serializing the workbook on every tool call.
- * - Avoid dumping huge spreadsheet content into the LLM context: the agent
- *   references workbooks by short opaque IDs and reads only the ranges it
- *   needs through dedicated tools.
- * - Scope strictly to `(userId, sessionId)` so a user can never reach another
- *   user's workbook. Entries expire automatically.
- *
- * NOTE: This is process-local memory. In a multi-instance deployment each
- * server instance keeps its own cache; that is acceptable because the cache
- * is rebuilt from the message history on demand and download URLs target the
- * same instance the agent ran on (sticky via session ID + Cognito).
- */
 import { randomUUID } from "node:crypto";
-import ExcelJS from "exceljs";
+import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
+import { copyFile, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { callExcelMcpTool } from "@/lib/agent/excel/mcp-client";
 
 export type WorkbookKind = "input" | "output";
 
@@ -28,8 +15,10 @@ export interface StoredWorkbook {
   sessionId: string;
   /** Display file name (with .xlsx extension). */
   name: string;
-  /** Loaded ExcelJS workbook. Mutated in-place by tools. */
-  workbook: ExcelJS.Workbook;
+  /** Absolute local path used by the Next.js process for upload/download. */
+  filePath: string;
+  /** Path sent to the Excel MCP server. Absolute for stdio, relative for HTTP. */
+  mcpFilePath: string;
   /** Whether this is an originally uploaded file or an agent-produced result. */
   kind: WorkbookKind;
   /** Optional reference to the parent (input) workbook ID for outputs. */
@@ -40,42 +29,22 @@ export interface StoredWorkbook {
   lastAccessAt: number;
 }
 
-const TTL_MS = 30 * 60 * 1000; // 30 minutes
+const TTL_MS = 30 * 60 * 1000;
 const MAX_PER_SESSION = 20;
 const MAX_TOTAL = 200;
 
 const store = new Map<string, StoredWorkbook>();
 
-type ExcelLoadInput = Parameters<ExcelJS.Workbook["xlsx"]["load"]>[0];
-
-function toExcelLoadInput(buffer: Buffer | ArrayBuffer): ExcelLoadInput {
-  return buffer as unknown as ExcelLoadInput;
+function getExcelFilesRoot(): string {
+  return path.resolve(process.env.EXCEL_MCP_FILES_DIR ?? path.join(process.cwd(), ".tmp", "agent-excel"));
 }
 
-function sweep(): void {
-  const now = Date.now();
-  for (const [id, wb] of store) {
-    if (now - wb.lastAccessAt > TTL_MS) store.delete(id);
-  }
-  // Hard cap: drop oldest if exceeded.
-  if (store.size > MAX_TOTAL) {
-    const entries = [...store.entries()].sort(
-      (a, b) => a[1].lastAccessAt - b[1].lastAccessAt,
-    );
-    for (const [id] of entries.slice(0, store.size - MAX_TOTAL)) {
-      store.delete(id);
-    }
-  }
+function usesRelativeMcpPaths(): boolean {
+  return Boolean(process.env.EXCEL_MCP_URL?.trim());
 }
 
-function enforceSessionCap(userId: string, sessionId: string): void {
-  const owned = [...store.values()]
-    .filter((w) => w.userId === userId && w.sessionId === sessionId)
-    .sort((a, b) => a.lastAccessAt - b.lastAccessAt);
-  while (owned.length > MAX_PER_SESSION) {
-    const victim = owned.shift();
-    if (victim) store.delete(victim.id);
-  }
+function sanitizePathPart(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120) || "unknown";
 }
 
 function ensureXlsxName(name: string): string {
@@ -87,63 +56,142 @@ function ensureXlsxName(name: string): string {
   return `${base || "munkafuzet"}.xlsx`;
 }
 
-/** Loads an uploaded buffer into the session and returns its store ID. */
+function createWorkbookPaths(input: {
+  userId: string;
+  sessionId: string;
+  workbookId: string;
+  name: string;
+}): { filePath: string; mcpFilePath: string } {
+  const root = getExcelFilesRoot();
+  const relativePath = path.join(
+    "sessions",
+    sanitizePathPart(input.userId),
+    sanitizePathPart(input.sessionId),
+    `${input.workbookId}-${ensureXlsxName(input.name)}`,
+  );
+  const filePath = path.join(root, relativePath);
+  mkdirSync(path.dirname(filePath), { recursive: true });
+
+  return {
+    filePath,
+    mcpFilePath: usesRelativeMcpPaths() ? relativePath.split(path.sep).join("/") : filePath,
+  };
+}
+
+function deleteWorkbookFile(workbook: StoredWorkbook): void {
+  try {
+    if (existsSync(workbook.filePath)) rmSync(workbook.filePath, { force: true });
+  } catch {
+    // Best-effort cleanup only; stale temp files are safe to overwrite by UUID.
+  }
+}
+
+function sweep(): void {
+  const now = Date.now();
+  for (const [id, workbook] of store) {
+    if (now - workbook.lastAccessAt > TTL_MS) {
+      deleteWorkbookFile(workbook);
+      store.delete(id);
+    }
+  }
+  if (store.size > MAX_TOTAL) {
+    const entries = [...store.entries()].sort(
+      (left, right) => left[1].lastAccessAt - right[1].lastAccessAt,
+    );
+    for (const [id, workbook] of entries.slice(0, store.size - MAX_TOTAL)) {
+      deleteWorkbookFile(workbook);
+      store.delete(id);
+    }
+  }
+}
+
+function enforceSessionCap(userId: string, sessionId: string): void {
+  const owned = [...store.values()]
+    .filter((workbook) => workbook.userId === userId && workbook.sessionId === sessionId)
+    .sort((left, right) => left.lastAccessAt - right.lastAccessAt);
+  while (owned.length > MAX_PER_SESSION) {
+    const victim = owned.shift();
+    if (victim) {
+      deleteWorkbookFile(victim);
+      store.delete(victim.id);
+    }
+  }
+}
+
+function createStoredWorkbook(input: {
+  userId: string;
+  sessionId: string;
+  name: string;
+  kind: WorkbookKind;
+  derivedFrom?: string;
+}): StoredWorkbook {
+  sweep();
+  const id = randomUUID();
+  const name = ensureXlsxName(input.name);
+  const paths = createWorkbookPaths({
+    userId: input.userId,
+    sessionId: input.sessionId,
+    workbookId: id,
+    name,
+  });
+  const now = Date.now();
+  const stored: StoredWorkbook = {
+    id,
+    userId: input.userId,
+    sessionId: input.sessionId,
+    name,
+    filePath: paths.filePath,
+    mcpFilePath: paths.mcpFilePath,
+    kind: input.kind,
+    derivedFrom: input.derivedFrom,
+    createdAt: now,
+    lastAccessAt: now,
+  };
+  store.set(id, stored);
+  enforceSessionCap(input.userId, input.sessionId);
+  return stored;
+}
+
+/** Writes an uploaded workbook into the session file store. */
 export async function registerInputWorkbook(input: {
   userId: string;
   sessionId: string;
   name: string;
   buffer: Buffer;
 }): Promise<StoredWorkbook> {
-  sweep();
-  const workbook = new ExcelJS.Workbook();
-  // ExcelJS reads .xlsx (Office Open XML). For .xls/.csv fallback handled above.
-  await workbook.xlsx.load(toExcelLoadInput(input.buffer));
-
-  const id = randomUUID();
-  const now = Date.now();
-  const stored: StoredWorkbook = {
-    id,
+  const stored = createStoredWorkbook({
     userId: input.userId,
     sessionId: input.sessionId,
-    name: ensureXlsxName(input.name),
-    workbook,
+    name: input.name,
     kind: "input",
-    createdAt: now,
-    lastAccessAt: now,
-  };
-  store.set(id, stored);
-  enforceSessionCap(input.userId, input.sessionId);
+  });
+  await writeFile(stored.filePath, input.buffer);
   return stored;
 }
 
-/** Creates a brand-new empty workbook in the session. */
-export function registerEmptyWorkbook(input: {
+/** Creates a brand-new empty workbook through the Excel MCP server. */
+export async function registerEmptyWorkbook(input: {
   userId: string;
   sessionId: string;
   name: string;
-}): StoredWorkbook {
-  sweep();
-  const workbook = new ExcelJS.Workbook();
-  workbook.addWorksheet("Sheet1");
-
-  const id = randomUUID();
-  const now = Date.now();
-  const stored: StoredWorkbook = {
-    id,
+}): Promise<StoredWorkbook> {
+  const stored = createStoredWorkbook({
     userId: input.userId,
     sessionId: input.sessionId,
-    name: ensureXlsxName(input.name),
-    workbook,
+    name: input.name,
     kind: "output",
-    createdAt: now,
-    lastAccessAt: now,
-  };
-  store.set(id, stored);
-  enforceSessionCap(input.userId, input.sessionId);
+  });
+  try {
+    await callExcelMcpTool("create_workbook", { filepath: stored.mcpFilePath });
+  } catch (error) {
+    deleteWorkbookFile(stored);
+    store.delete(stored.id);
+    throw error;
+  }
   return stored;
 }
 
-/** Clones an existing workbook (deep copy via xlsx round-trip). */
+/** Clones an existing workbook file into a new session output. */
 export async function cloneWorkbook(input: {
   userId: string;
   sessionId: string;
@@ -156,25 +204,14 @@ export async function cloneWorkbook(input: {
     sessionId: input.sessionId,
     workbookId: input.sourceId,
   });
-  const buffer = await source.workbook.xlsx.writeBuffer();
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(toExcelLoadInput(buffer));
-
-  const id = randomUUID();
-  const now = Date.now();
-  const stored: StoredWorkbook = {
-    id,
+  const stored = createStoredWorkbook({
     userId: input.userId,
     sessionId: input.sessionId,
-    name: ensureXlsxName(input.name),
-    workbook,
+    name: input.name,
     kind: input.kind ?? "output",
     derivedFrom: source.id,
-    createdAt: now,
-    lastAccessAt: now,
-  };
-  store.set(id, stored);
-  enforceSessionCap(input.userId, input.sessionId);
+  });
+  await copyFile(source.filePath, stored.filePath);
   return stored;
 }
 
@@ -184,46 +221,48 @@ export function getWorkbook(input: {
   sessionId: string;
   workbookId: string;
 }): StoredWorkbook | null {
-  const wb = store.get(input.workbookId);
-  if (!wb) return null;
-  if (wb.userId !== input.userId || wb.sessionId !== input.sessionId) return null;
-  if (Date.now() - wb.lastAccessAt > TTL_MS) {
+  const workbook = store.get(input.workbookId);
+  if (!workbook) return null;
+  if (workbook.userId !== input.userId || workbook.sessionId !== input.sessionId) return null;
+  if (Date.now() - workbook.lastAccessAt > TTL_MS) {
+    deleteWorkbookFile(workbook);
     store.delete(input.workbookId);
     return null;
   }
-  wb.lastAccessAt = Date.now();
-  return wb;
+  workbook.lastAccessAt = Date.now();
+  return workbook;
 }
 
-/** Strict variant — throws a descriptive error if missing. */
+/** Strict variant that throws a descriptive error if missing. */
 export function requireWorkbook(input: {
   userId: string;
   sessionId: string;
   workbookId: string;
 }): StoredWorkbook {
-  const wb = getWorkbook(input);
-  if (!wb) {
+  const workbook = getWorkbook(input);
+  if (!workbook) {
     throw new Error(
       `Workbook ${input.workbookId} not found in this session (it may have expired or never existed).`,
     );
   }
-  return wb;
+  return workbook;
 }
 
-/** Looks up by ID alone — used by the download endpoint after RBAC check. */
+/** Looks up by ID alone; used by the download endpoint after RBAC check. */
 export function getWorkbookForDownload(input: {
   userId: string;
   workbookId: string;
 }): StoredWorkbook | null {
-  const wb = store.get(input.workbookId);
-  if (!wb) return null;
-  if (wb.userId !== input.userId) return null;
-  if (Date.now() - wb.lastAccessAt > TTL_MS) {
+  const workbook = store.get(input.workbookId);
+  if (!workbook) return null;
+  if (workbook.userId !== input.userId) return null;
+  if (Date.now() - workbook.lastAccessAt > TTL_MS) {
+    deleteWorkbookFile(workbook);
     store.delete(input.workbookId);
     return null;
   }
-  wb.lastAccessAt = Date.now();
-  return wb;
+  workbook.lastAccessAt = Date.now();
+  return workbook;
 }
 
 /** Lists workbooks visible to a session (input + output). */
@@ -233,36 +272,41 @@ export function listSessionWorkbooks(input: {
 }): StoredWorkbook[] {
   sweep();
   return [...store.values()].filter(
-    (w) => w.userId === input.userId && w.sessionId === input.sessionId,
+    (workbook) => workbook.userId === input.userId && workbook.sessionId === input.sessionId,
   );
 }
 
-/** Renames a stored workbook (does not touch the workbook content). */
+/** Renames a stored workbook display name. */
 export function renameWorkbook(input: {
   userId: string;
   sessionId: string;
   workbookId: string;
   name: string;
 }): StoredWorkbook {
-  const wb = requireWorkbook(input);
-  wb.name = ensureXlsxName(input.name);
-  return wb;
+  const workbook = requireWorkbook(input);
+  workbook.name = ensureXlsxName(input.name);
+  return workbook;
 }
 
-/** Drops a workbook from the cache (e.g. session close, manual cleanup). */
+/** Drops a workbook from the cache and removes its backing temp file. */
 export function deleteWorkbook(input: {
   userId: string;
   sessionId: string;
   workbookId: string;
 }): boolean {
-  const wb = getWorkbook(input);
-  if (!wb) return false;
+  const workbook = getWorkbook(input);
+  if (!workbook) return false;
+  deleteWorkbookFile(workbook);
   store.delete(input.workbookId);
   return true;
 }
 
-/** Serializes a workbook to xlsx bytes for download or persistence. */
+/** Reads workbook bytes for download or persistence. */
 export async function serializeWorkbook(stored: StoredWorkbook): Promise<Buffer> {
-  const buffer = await stored.workbook.xlsx.writeBuffer();
-  return Buffer.from(buffer as ArrayBuffer);
+  return readFile(stored.filePath);
+}
+
+/** Returns current backing file size in bytes. */
+export function getWorkbookFileSize(stored: StoredWorkbook): number {
+  return statSync(stored.filePath).size;
 }

@@ -56,7 +56,7 @@ function isPdf(file: IncomingAgentFileAttachment): boolean {
   return file.mediaType === "application/pdf" || extensionOf(file.name) === "pdf";
 }
 
-/** Anthropic accepts PDFs up to ~32 MB / 100 pages as native document blocks. */
+/** Conservative PDF cap before forwarding the file through OpenRouter. */
 const MAX_NATIVE_PDF_BYTES = 32 * 1024 * 1024;
 
 function extractText(buffer: Buffer): string {
@@ -160,11 +160,11 @@ export async function processAgentFileAttachments(
           name: file.name,
           mediaType: "application/pdf",
           size: file.size,
-          // base64 megőrzése a natív Claude document content-blockhoz
+          // Keep base64 for the OpenRouter file content block.
           base64: file.base64,
           extractionStatus: "processed",
           summary:
-            "PDF dokumentum natív formában csatolva — Claude közvetlenül olvassa a tartalmát (szöveg + képek).",
+            "PDF dokumentum natív formában csatolva OpenRouteren keresztül, a modell közvetlenül olvassa a tartalmát.",
         });
         continue;
       }

@@ -34,6 +34,7 @@ import {
   uploadVersionFile,
   getVersionFileDownloadUrl,
 } from "@/server/actions/version-files";
+import { ImportIssuesIndicator } from "./ImportIssuesIndicator";
 
 const CARD_W = 200;
 const CARD_H = 96;
@@ -555,6 +556,7 @@ export function VersionGraph({
                           </span>
                         </span>
                       )}
+                      {!isRenaming && <ImportIssuesIndicator issues={v.importIssues} compact />}
                       {/* Rename confirm/cancel */}
                       {isRenaming && (
                         <div className="flex items-center gap-0.5" onClick={(e) => e.stopPropagation()}>

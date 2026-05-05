@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS versions (
     budget_id     BIGINT NOT NULL REFERENCES budgets(id) ON DELETE CASCADE,
     parent_id     BIGINT REFERENCES versions(id) ON DELETE RESTRICT,
     version_name  TEXT NOT NULL,
+    import_issues JSONB,
     created_at    TIMESTAMPTZ DEFAULT NOW()
 );
 

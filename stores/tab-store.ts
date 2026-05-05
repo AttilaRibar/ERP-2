@@ -8,6 +8,10 @@ export interface ErpTab {
   title: string;
   color: string;
   tabType: TabType;
+  /** Optional second-line context (e.g. parent project name). */
+  subtitle?: string;
+  /** Short type label shown on the tab (e.g. "Költségvetés", "Verzió"). */
+  typeLabel?: string;
   params?: Record<string, unknown>;
   isDirty?: boolean;
   isLoading?: boolean;
@@ -30,6 +34,13 @@ function inferTabType(moduleKey: string, params?: Record<string, unknown>): TabT
 }
 
 function dedupKey(moduleKey: string, params?: Record<string, unknown>): string {
+  if (moduleKey === "budgets-version") {
+    return `${moduleKey}::${JSON.stringify({
+      budgetId: params?.budgetId,
+      versionId: params?.versionId,
+    })}`;
+  }
+
   const sorted = params
     ? Object.keys(params)
         .sort()
@@ -60,6 +71,9 @@ export const useTabStore = create<TabStore>((set, get) => ({
       const patch: Partial<ErpTab> = {};
       if (tab.tabType && tab.tabType !== existing.tabType) patch.tabType = tab.tabType;
       if (tab.title && tab.title !== existing.title) patch.title = tab.title;
+      if (tab.subtitle !== undefined && tab.subtitle !== existing.subtitle) patch.subtitle = tab.subtitle;
+      if (tab.typeLabel !== undefined && tab.typeLabel !== existing.typeLabel) patch.typeLabel = tab.typeLabel;
+      if (tab.params !== undefined && JSON.stringify(tab.params) !== JSON.stringify(existing.params)) patch.params = tab.params;
       if (Object.keys(patch).length > 0) {
         set((s) => ({
           tabs: s.tabs.map((t) => t.id === existing.id ? { ...t, ...patch } : t),

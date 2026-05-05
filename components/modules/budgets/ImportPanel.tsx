@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Upload,
   FileSpreadsheet,
@@ -23,22 +23,29 @@ import {
   CheckSquare,
   MinusSquare,
   Pencil,
+  FolderKanban,
 } from "lucide-react";
-import { parseExcelBuffer, type ExcelParseResult, type ParsedBudgetItem } from "@/lib/import/excel-parser";
+import { parseExcelBuffer, type ExcelParseResult, type ParseIssue, type ParsedBudgetItem } from "@/lib/import/excel-parser";
 import { mapParsedDataToBudget, type MappedBudgetData } from "@/lib/import/budget-mapper";
 import { importVersionWithItems } from "@/server/actions/import";
+import { getBudgets, getBudgetById } from "@/server/actions/budgets";
+import { getProjectsForSelect } from "@/server/actions/projects";
 import {
   getVersionsByBudgetId,
   getPartnersForVersionSelect,
   type VersionInfo,
   type VersionType,
 } from "@/server/actions/versions";
+import type { VersionImportIssue, VersionImportIssues } from "@/types/import-issues";
 
 function fmt(n: number): string {
   return new Intl.NumberFormat("hu-HU", { maximumFractionDigits: 0 }).format(n);
 }
 
-type ImportStep = "upload" | "preview" | "config" | "importing" | "done" | "error";
+type ImportStep = "target" | "upload" | "preview" | "importing" | "done" | "error";
+
+type ProjectOption = Awaited<ReturnType<typeof getProjectsForSelect>>[number];
+type BudgetOption = Awaited<ReturnType<typeof getBudgets>>[number];
 
 // ---- Multi-file + selection state ----
 
@@ -106,7 +113,7 @@ function countSelected(files: LoadedFile[], sel: SelectionState): number {
   for (const f of files) {
     const fileSel = sel.get(f.id);
     if (!fileSel) continue;
-    for (const [mainCat, mainVal] of fileSel) {
+    for (const [, mainVal] of fileSel) {
       if (!mainVal.selected) continue;
       for (const [, subVal] of mainVal.subCats) {
         if (!subVal.selected) continue;
@@ -125,8 +132,18 @@ function countSelected(files: LoadedFile[], sel: SelectionState): number {
  * When a file has a rootSectionName, all sheets in that file are wrapped under
  * a virtual top-level section with that name, with the sheet names becoming sub-categories.
  */
+function issueRowKey(sheet: string, row: number): string {
+  return `${sheet}::${row}`;
+}
+
+function withFileName(issue: ParseIssue, fileName: string): ParseIssue {
+  return { ...issue, fileName };
+}
+
 function buildFilteredResult(files: LoadedFile[], sel: SelectionState): ExcelParseResult {
   const items: ParsedBudgetItem[] = [];
+  const selectedSheetsByFile = new Map<string, Set<string>>();
+  const selectedRowsByFile = new Map<string, Set<string>>();
   let seqCounter = 0;
 
   for (const f of files) {
@@ -146,6 +163,15 @@ function buildFilteredResult(files: LoadedFile[], sel: SelectionState): ExcelPar
           if (!orig) continue;
           seqCounter++;
 
+          const sourceSheet = orig.sourceSheet ?? orig.mainCategory;
+          const sourceRow = orig.sourceRow ?? orig.sequenceNo;
+          const selectedSheets = selectedSheetsByFile.get(f.id) ?? new Set<string>();
+          selectedSheets.add(sourceSheet);
+          selectedSheetsByFile.set(f.id, selectedSheets);
+          const selectedRows = selectedRowsByFile.get(f.id) ?? new Set<string>();
+          selectedRows.add(issueRowKey(sourceSheet, sourceRow));
+          selectedRowsByFile.set(f.id, selectedRows);
+
           let effectiveMain: string;
           let effectiveSub: string | null;
 
@@ -158,11 +184,33 @@ function buildFilteredResult(files: LoadedFile[], sel: SelectionState): ExcelPar
             effectiveSub = sub === "__root__" ? null : sub;
           }
 
-          items.push({ ...orig, sequenceNo: seqCounter, mainCategory: effectiveMain, subCategory: effectiveSub });
+          items.push({
+            ...orig,
+            sequenceNo: seqCounter,
+            mainCategory: effectiveMain,
+            subCategory: effectiveSub,
+            sourceSheet,
+            sourceRow,
+            sourceFileName: f.fileName,
+          });
         }
       }
     }
   }
+
+  const readErrors = files.flatMap((f) => {
+    const selectedSheets = selectedSheetsByFile.get(f.id) ?? new Set<string>();
+    return f.parseResult.readErrors
+      .filter((issue) => selectedSheets.has(issue.sheet))
+      .map((issue) => withFileName(issue, f.fileName));
+  });
+
+  const formulaErrors = files.flatMap((f) => {
+    const selectedRows = selectedRowsByFile.get(f.id) ?? new Set<string>();
+    return f.parseResult.formulaErrors
+      .filter((issue) => selectedRows.has(issueRowKey(issue.sheet, issue.row)))
+      .map((issue) => withFileName(issue, f.fileName));
+  });
 
   // Rebuild sheetSummaries from filtered items
   const sheetMap = new Map<string, { itemCount: number; materialTotal: number; feeTotal: number; subCats: Set<string> }>();
@@ -179,7 +227,9 @@ function buildFilteredResult(files: LoadedFile[], sel: SelectionState): ExcelPar
 
   return {
     items,
-    warnings: files.flatMap((f) => f.parseResult.warnings),
+    readErrors,
+    formulaErrors,
+    warnings: [...readErrors, ...formulaErrors],
     skippedSheets: files.flatMap((f) => f.parseResult.skippedSheets),
     sheetSummaries: Array.from(sheetMap.entries()).map(([sheetName, v]) => ({
       sheetName,
@@ -196,16 +246,155 @@ function buildFilteredResult(files: LoadedFile[], sel: SelectionState): ExcelPar
   };
 }
 
+function parseIssueToVersionIssue(
+  issue: ParseIssue,
+  category: "excel_read" | "formula",
+): VersionImportIssue {
+  return {
+    category,
+    message: issue.message,
+    fileName: issue.fileName,
+    sheet: issue.sheet,
+    row: issue.row,
+    rawData: issue.rawData,
+  };
+}
+
+function buildEmptyImportIssues(): VersionImportIssues {
+  return { readErrors: [], formulaErrors: [], contentErrors: [] };
+}
+
+function hasImportIssues(issues: VersionImportIssues): boolean {
+  return issues.readErrors.length + issues.formulaErrors.length + issues.contentErrors.length > 0;
+}
+
+function categoryPath(item: ParsedBudgetItem): string {
+  return [item.mainCategory, item.subCategory].filter(Boolean).join(" / ");
+}
+
+function priceSignature(item: ParsedBudgetItem): string {
+  return `${item.materialUnitPrice.toFixed(2)}::${item.feeUnitPrice.toFixed(2)}`;
+}
+
+function itemGroupKey(item: ParsedBudgetItem): string {
+  const itemNumber = item.itemNumber.trim();
+  const itemName = item.name.trim().toLowerCase().replace(/\s+/g, " ");
+  return `${itemNumber}::${itemName}`;
+}
+
+function formatMoney(n: number): string {
+  return `${fmt(n)} Ft`;
+}
+
+function formatQuantity(item: ParsedBudgetItem): string {
+  return `${new Intl.NumberFormat("hu-HU", { maximumFractionDigits: 4 }).format(item.quantity)} ${item.unit}`.trim();
+}
+
+function buildContentErrors(items: ParsedBudgetItem[]): VersionImportIssue[] {
+  const byItemNumber = new Map<string, ParsedBudgetItem[]>();
+
+  for (const item of items) {
+    const key = item.itemNumber.trim();
+    if (!key) continue;
+    const groupKey = itemGroupKey(item);
+    const group = byItemNumber.get(groupKey) ?? [];
+    group.push(item);
+    byItemNumber.set(groupKey, group);
+  }
+
+  const issues: VersionImportIssue[] = [];
+  for (const [, group] of byItemNumber) {
+    if (group.length < 2) continue;
+
+    const prices = new Map<string, ParsedBudgetItem[]>();
+    for (const item of group) {
+      const signature = priceSignature(item);
+      const priceGroup = prices.get(signature) ?? [];
+      priceGroup.push(item);
+      prices.set(signature, priceGroup);
+    }
+
+    if (prices.size < 2) continue;
+
+    const itemNumber = group[0].itemNumber.trim();
+    const firstName = group.find((item) => item.name.trim())?.name.trim() ?? "névtelen tétel";
+    const cheapestCombinedUnitPrice = Math.min(
+      ...group.map((item) => item.materialUnitPrice + item.feeUnitPrice),
+    );
+
+    let totalDifference = 0;
+    const priceRows = group
+      .map((item) => {
+        const combinedUnitPrice = item.materialUnitPrice + item.feeUnitPrice;
+        const difference = Math.max(0, (combinedUnitPrice - cheapestCombinedUnitPrice) * item.quantity);
+        totalDifference += difference;
+
+        return {
+          fileName: item.sourceFileName,
+          categoryPath: categoryPath(item),
+          quantity: formatQuantity(item),
+          materialUnitPrice: formatMoney(item.materialUnitPrice),
+          feeUnitPrice: formatMoney(item.feeUnitPrice),
+          difference: difference > 0 ? `+${formatMoney(difference)}` : formatMoney(0),
+          source: `${item.sourceSheet} sor ${item.sourceRow}`,
+          sortValue: difference,
+        };
+      })
+      .sort((a, b) => b.sortValue - a.sortValue)
+      .map((row) => ({
+        fileName: row.fileName,
+        categoryPath: row.categoryPath,
+        quantity: row.quantity,
+        materialUnitPrice: row.materialUnitPrice,
+        feeUnitPrice: row.feeUnitPrice,
+        difference: row.difference,
+        source: row.source,
+      }));
+
+    const details = priceRows.map((row) => (
+      `${row.fileName ?? "Ismeretlen fájl"} | ${row.categoryPath} | ${row.quantity} | ${row.materialUnitPrice} | ${row.feeUnitPrice} | ${row.difference}`
+    ));
+
+    issues.push({
+      category: "content",
+      message: itemNumber ? `${itemNumber} - ${firstName}` : firstName,
+      description: `Ha a legalacsonyabb egységárat vesszük alapul, a drágább előfordulások becsült többlete összesen ${formatMoney(totalDifference)}.`,
+      details,
+      priceRows,
+      totalDifference: formatMoney(totalDifference),
+    });
+  }
+
+  return issues;
+}
+
 interface ImportPanelProps {
   budgetId: number;
   onClose: () => void;
-  onImported: (versionId: number, versionName: string, versionType: VersionType, partnerName: string | null) => void;
+  onImported: (
+    versionId: number,
+    versionName: string,
+    versionType: VersionType,
+    partnerName: string | null,
+    targetBudgetId: number,
+    targetBudgetName: string | null,
+  ) => void;
 }
 
 export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps) {
-  const [step, setStep] = useState<ImportStep>("upload");
+  const [step, setStep] = useState<ImportStep>("target");
   const [dragOver, setDragOver] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
+
+  // Target step state
+  const [projects, setProjects] = useState<ProjectOption[]>([]);
+  const [budgetOptions, setBudgetOptions] = useState<BudgetOption[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
+  const [selectedBudgetId, setSelectedBudgetId] = useState<number | null>(budgetId);
+  const [targetError, setTargetError] = useState<string | null>(null);
+  const [loadingTarget, setLoadingTarget] = useState(true);
+  const [loadingBudgets, setLoadingBudgets] = useState(false);
+  const [loadingVersions, setLoadingVersions] = useState(false);
 
   // Multi-file state
   const [loadedFiles, setLoadedFiles] = useState<LoadedFile[]>([]);
@@ -222,15 +411,137 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
   const [versionType, setVersionType] = useState<VersionType>("offer");
   const [parentId, setParentId] = useState<number | null>(null);
   const [partnerId, setPartnerId] = useState<number | null>(null);
-  const [loadingConfig, setLoadingConfig] = useState(false);
 
   // Import state
   const [importError, setImportError] = useState<string | null>(null);
   const [importedVersion, setImportedVersion] = useState<VersionInfo | null>(null);
   const [filteredResult, setFilteredResult] = useState<ExcelParseResult | null>(null);
   const [mappedData, setMappedData] = useState<MappedBudgetData | null>(null);
+  const [importIssues, setImportIssues] = useState<VersionImportIssues>(buildEmptyImportIssues());
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const selectedBudget = useMemo(
+    () => budgetOptions.find((budget) => budget.id === selectedBudgetId) ?? null,
+    [budgetOptions, selectedBudgetId],
+  );
+
+  const selectedProject = useMemo(
+    () => projects.find((project) => project.id === selectedProjectId) ?? null,
+    [projects, selectedProjectId],
+  );
+
+  const selectedParent = useMemo(
+    () => existingVersions.find((version) => version.id === parentId) ?? null,
+    [existingVersions, parentId],
+  );
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadInitialTarget() {
+      setLoadingTarget(true);
+      setTargetError(null);
+      try {
+        const [currentBudget, projectRows, partnerRows] = await Promise.all([
+          getBudgetById(budgetId),
+          getProjectsForSelect(),
+          getPartnersForVersionSelect(),
+        ]);
+
+        if (!active) return;
+
+        setProjects(projectRows);
+        setPartners(partnerRows);
+
+        const initialProjectId = currentBudget?.projectId ?? projectRows[0]?.id ?? null;
+        setSelectedProjectId(initialProjectId);
+
+        if (initialProjectId) {
+          const budgetRows = await getBudgets(undefined, String(initialProjectId));
+          if (!active) return;
+          setBudgetOptions(budgetRows);
+          const initialBudgetId = budgetRows.some((budget) => budget.id === budgetId)
+            ? budgetId
+            : budgetRows[0]?.id ?? null;
+          setSelectedBudgetId(initialBudgetId);
+        }
+      } catch (err) {
+        if (!active) return;
+        setTargetError(err instanceof Error ? err.message : "Nem sikerült betölteni az import célját");
+      } finally {
+        if (active) setLoadingTarget(false);
+      }
+    }
+
+    void loadInitialTarget();
+    return () => {
+      active = false;
+    };
+  }, [budgetId]);
+
+  useEffect(() => {
+    if (loadingTarget || selectedProjectId === null) return;
+    let active = true;
+
+    async function loadBudgetsForProject() {
+      setLoadingBudgets(true);
+      try {
+        const rows = await getBudgets(undefined, String(selectedProjectId));
+        if (!active) return;
+        setBudgetOptions(rows);
+        setSelectedBudgetId((current) => (
+          rows.some((budget) => budget.id === current) ? current : rows[0]?.id ?? null
+        ));
+      } catch (err) {
+        if (!active) return;
+        setTargetError(err instanceof Error ? err.message : "Nem sikerült betölteni a költségvetéseket");
+      } finally {
+        if (active) setLoadingBudgets(false);
+      }
+    }
+
+    void loadBudgetsForProject();
+    return () => {
+      active = false;
+    };
+  }, [loadingTarget, selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedBudgetId === null) {
+      setExistingVersions([]);
+      setParentId(null);
+      return;
+    }
+
+    let active = true;
+    const budgetIdForVersions = selectedBudgetId;
+    async function loadVersionsForBudget() {
+      setLoadingVersions(true);
+      try {
+        const versions = await getVersionsByBudgetId(budgetIdForVersions);
+        if (!active) return;
+        setExistingVersions(versions);
+        setParentId((current) => (
+          current && versions.some((version) => version.id === current)
+            ? current
+            : versions.length === 0
+              ? null
+              : current
+        ));
+      } catch (err) {
+        if (!active) return;
+        setTargetError(err instanceof Error ? err.message : "Nem sikerült betölteni a verziókat");
+      } finally {
+        if (active) setLoadingVersions(false);
+      }
+    }
+
+    void loadVersionsForBudget();
+    return () => {
+      active = false;
+    };
+  }, [selectedBudgetId]);
 
   const addFiles = useCallback(async (files: File[]) => {
     setParseError(null);
@@ -377,37 +688,47 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
 
   // ---- Navigation ----
 
-  const goToConfig = useCallback(async () => {
-    setLoadingConfig(true);
-    try {
-      const [vers, parts] = await Promise.all([
-        getVersionsByBudgetId(budgetId),
-        getPartnersForVersionSelect(),
-      ]);
-      setExistingVersions(vers);
-      setPartners(parts);
-      if (vers.length === 0) setParentId(null);
-      setStep("config");
-    } finally {
-      setLoadingConfig(false);
+  const handleTargetContinue = useCallback(() => {
+    setTargetError(null);
+    if (!selectedProjectId) {
+      setTargetError("Projekt kiválasztása kötelező");
+      return;
     }
-  }, [budgetId]);
+    if (!selectedBudgetId) {
+      setTargetError("Költségvetés kiválasztása kötelező");
+      return;
+    }
+    if (!versionName.trim()) {
+      setTargetError("A verzió neve kötelező");
+      return;
+    }
+    if (existingVersions.length > 0 && !parentId) {
+      setTargetError("Meglévő költségvetésnél szülő verzió kiválasztása kötelező");
+      return;
+    }
+    setStep(loadedFiles.length > 0 ? "preview" : "upload");
+  }, [existingVersions.length, loadedFiles.length, parentId, selectedBudgetId, selectedProjectId, versionName]);
 
-  const handleImport = useCallback(async () => {
-    if (!mappedData || !versionName.trim()) return;
+  const startImport = useCallback(async (
+    filtered: ExcelParseResult,
+    mapped: MappedBudgetData,
+    issues: VersionImportIssues,
+  ) => {
+    if (!selectedBudgetId || !versionName.trim()) return;
 
     setStep("importing");
     setImportError(null);
 
     try {
       const result = await importVersionWithItems({
-        budgetId,
+        budgetId: selectedBudgetId,
         parentId,
         versionName: versionName.trim(),
         versionType,
         partnerId,
-        sections: mappedData.sections,
-        items: mappedData.items,
+        sections: mapped.sections,
+        items: mapped.items,
+        importIssues: hasImportIssues(issues) ? issues : null,
       });
 
       if (result.success && result.data) {
@@ -421,16 +742,22 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
       setImportError(err instanceof Error ? err.message : "Ismeretlen hiba");
       setStep("error");
     }
-  }, [mappedData, budgetId, parentId, versionName, versionType, partnerId]);
+  }, [parentId, partnerId, selectedBudgetId, versionName, versionType]);
 
-  // Build filtered result + mapped data when proceeding to config
+  // Build filtered result + mapped data, then import into the already selected target.
   const handlePreviewContinue = useCallback(async () => {
     const filtered = buildFilteredResult(loadedFiles, selection);
     const mapped = mapParsedDataToBudget(filtered);
+    const issues: VersionImportIssues = {
+      readErrors: filtered.readErrors.map((issue) => parseIssueToVersionIssue(issue, "excel_read")),
+      formulaErrors: filtered.formulaErrors.map((issue) => parseIssueToVersionIssue(issue, "formula")),
+      contentErrors: buildContentErrors(filtered.items),
+    };
     setFilteredResult(filtered);
     setMappedData(mapped);
-    await goToConfig();
-  }, [loadedFiles, selection, goToConfig]);
+    setImportIssues(issues);
+    await startImport(filtered, mapped, issues);
+  }, [loadedFiles, selection, startImport]);
 
   const selectedCount = useMemo(() => countSelected(loadedFiles, selection), [loadedFiles, selection]);
 
@@ -450,22 +777,51 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
         <h2 className="text-sm font-semibold text-[var(--slate-800)]">
           Verzió importálása Excelből
         </h2>
-        {step !== "upload" && step !== "done" && step !== "error" && (
+        {step !== "done" && step !== "error" && (
           <div className="ml-auto flex items-center gap-1.5 text-[10px] text-[var(--slate-400)]">
-            <StepDot active={step === "preview"} done={step === "config" || step === "importing"} label="1" />
+            <StepDot active={step === "target"} done={step !== "target"} label="1" />
             <span className="w-3 h-px bg-[var(--slate-200)]" />
-            <StepDot active={step === "config"} done={step === "importing"} label="2" />
+            <StepDot active={step === "upload" || step === "preview"} done={step === "importing"} label="2" />
           </div>
         )}
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
+        {step === "target" && (
+          <TargetStep
+            projects={projects}
+            budgets={budgetOptions}
+            versions={existingVersions}
+            partners={partners}
+            selectedProjectId={selectedProjectId}
+            selectedBudgetId={selectedBudgetId}
+            versionName={versionName}
+            versionType={versionType}
+            parentId={parentId}
+            partnerId={partnerId}
+            loading={loadingTarget}
+            loadingBudgets={loadingBudgets}
+            loadingVersions={loadingVersions}
+            error={targetError}
+            onProjectIdChange={setSelectedProjectId}
+            onBudgetIdChange={setSelectedBudgetId}
+            onVersionNameChange={setVersionName}
+            onVersionTypeChange={setVersionType}
+            onParentIdChange={setParentId}
+            onPartnerIdChange={setPartnerId}
+            onContinue={handleTargetContinue}
+          />
+        )}
+
         {(step === "upload" || step === "preview") && (
           <PreviewStep
             loadedFiles={loadedFiles}
             selection={selection}
             selectedCount={selectedCount}
+            targetLabel={`${selectedProject?.projectCode ? `${selectedProject.projectCode} ` : ""}${selectedProject?.name ?? "Projekt"} / ${selectedBudget?.name ?? "Költségvetés"}`}
+            versionLabel={versionName.trim()}
+            parentLabel={selectedParent?.versionName ?? (existingVersions.length === 0 ? "Gyökér verzió" : "Nincs szülő")}
             dragOver={dragOver}
             parseError={parseError}
             fileInputRef={fileInputRef}
@@ -483,26 +839,9 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
             onToggleItem={toggleItem}
             onToggleExpandKey={toggleExpandKey}
             onToggleWarnings={() => setShowWarnings((p) => !p)}
+            onBackToTarget={() => setStep("target")}
             onContinue={handlePreviewContinue}
-            loading={loadingConfig}
-          />
-        )}
-
-        {step === "config" && filteredResult && (
-          <ConfigStep
-            existingVersions={existingVersions}
-            partners={partners}
-            versionName={versionName}
-            versionType={versionType}
-            parentId={parentId}
-            partnerId={partnerId}
-            itemCount={filteredResult.totals.itemCount}
-            onVersionNameChange={setVersionName}
-            onVersionTypeChange={setVersionType}
-            onParentIdChange={setParentId}
-            onPartnerIdChange={setPartnerId}
-            onBack={() => setStep("preview")}
-            onImport={handleImport}
+            loading={false}
           />
         )}
 
@@ -533,8 +872,21 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
               <div>Díj: <strong className="text-[var(--slate-600)]">{fmt(filteredResult.totals.feeTotal)} Ft</strong></div>
               <div>Összesen: <strong className="text-[var(--indigo-600)]">{fmt(filteredResult.totals.materialTotal + filteredResult.totals.feeTotal)} Ft</strong></div>
             </div>
+            {hasImportIssues(importIssues) && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
+                <AlertTriangle size={13} />
+                Az import ellenőrzési hibái mentve lettek a verzióhoz.
+              </div>
+            )}
             <button
-              onClick={() => onImported(importedVersion.id, importedVersion.versionName, importedVersion.versionType, importedVersion.partnerName)}
+              onClick={() => onImported(
+                importedVersion.id,
+                importedVersion.versionName,
+                importedVersion.versionType,
+                importedVersion.partnerName,
+                importedVersion.budgetId,
+                selectedBudget?.name ?? null,
+              )}
               className="mt-2 px-5 py-2 rounded-lg bg-[var(--indigo-600)] text-white text-sm font-medium hover:bg-[var(--indigo-700)] transition-colors cursor-pointer"
             >
               Verzió megnyitása
@@ -552,10 +904,10 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
             </h3>
             <p className="text-sm text-red-600 text-center max-w-sm">{importError}</p>
             <button
-              onClick={() => setStep("config")}
+              onClick={() => setStep(loadedFiles.length > 0 ? "preview" : "target")}
               className="mt-2 px-4 py-2 rounded-lg border border-[var(--slate-200)] text-sm text-[var(--slate-700)] hover:bg-[var(--slate-50)] transition-colors cursor-pointer"
             >
-              Vissza a beállításokhoz
+              Vissza az importhoz
             </button>
           </div>
         )}
@@ -657,6 +1009,9 @@ function PreviewStep({
   loadedFiles,
   selection,
   selectedCount,
+  targetLabel,
+  versionLabel,
+  parentLabel,
   dragOver,
   parseError,
   fileInputRef,
@@ -674,12 +1029,16 @@ function PreviewStep({
   onToggleItem,
   onToggleExpandKey,
   onToggleWarnings,
+  onBackToTarget,
   onContinue,
   loading,
 }: {
   loadedFiles: LoadedFile[];
   selection: SelectionState;
   selectedCount: number;
+  targetLabel: string;
+  versionLabel: string;
+  parentLabel: string;
   dragOver: boolean;
   parseError: string | null;
   fileInputRef: React.RefObject<HTMLInputElement | null>;
@@ -697,11 +1056,22 @@ function PreviewStep({
   onToggleItem: (fileId: string, mainCat: string, subCat: string, seqNo: number, checked: boolean) => void;
   onToggleExpandKey: (key: string) => void;
   onToggleWarnings: () => void;
+  onBackToTarget: () => void;
   onContinue: () => void;
   loading: boolean;
 }) {
   const hasFiles = loadedFiles.length > 0;
-  const allWarnings = loadedFiles.flatMap((f) => f.parseResult.warnings);
+  const selectedPreviewResult = useMemo(
+    () => hasFiles ? buildFilteredResult(loadedFiles, selection) : null,
+    [hasFiles, loadedFiles, selection],
+  );
+  const previewContentErrors = useMemo(
+    () => selectedPreviewResult ? buildContentErrors(selectedPreviewResult.items) : [],
+    [selectedPreviewResult],
+  );
+  const allReadErrors = selectedPreviewResult?.readErrors ?? [];
+  const allFormulaErrors = selectedPreviewResult?.formulaErrors ?? [];
+  const totalIssueCount = allReadErrors.length + allFormulaErrors.length + previewContentErrors.length;
   const allSkipped = loadedFiles.flatMap((f) => f.parseResult.skippedSheets);
 
   // Totals across all loaded (not filtered) files
@@ -738,6 +1108,22 @@ function PreviewStep({
 
   return (
     <div className="p-5 space-y-4">
+      <div className="flex items-center gap-3 rounded-lg border border-[var(--slate-200)] bg-white px-3 py-2 text-xs">
+        <FolderKanban size={14} className="text-[var(--indigo-500)] shrink-0" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-medium text-[var(--slate-700)]">{targetLabel}</div>
+          <div className="truncate text-[10px] text-[var(--slate-400)]">
+            {versionLabel} · {parentLabel}
+          </div>
+        </div>
+        <button
+          onClick={onBackToTarget}
+          className="px-2 py-1 rounded-[6px] text-[10px] text-[var(--slate-500)] hover:bg-[var(--slate-50)] hover:text-[var(--slate-800)] transition-colors cursor-pointer"
+        >
+          Módosítás
+        </button>
+      </div>
+
       {/* Empty state: large drop zone */}
       {!hasFiles && (
         <>
@@ -961,16 +1347,18 @@ function PreviewStep({
 
                                   {/* Items */}
                                   {subExpanded && (
-                                    <div className="max-h-48 overflow-y-auto">
-                                      <table className="w-full text-[10px]">
+                                    <div className="max-h-48 overflow-auto">
+                                      <table className="w-full min-w-[760px] text-[10px]">
                                         <thead className="bg-[var(--slate-100)] sticky top-0">
                                           <tr className="text-[var(--slate-400)]">
                                             <th className="pl-12 pr-2 py-1 text-left font-medium w-6"></th>
-                                            <th className="px-2 py-1 text-left font-medium">Tételszám</th>
+                                            <th className="px-2 py-1 text-left font-medium whitespace-nowrap">Tételszám</th>
                                             <th className="px-2 py-1 text-left font-medium">Megnevezés</th>
-                                            <th className="px-2 py-1 text-right font-medium">Menny.</th>
-                                            <th className="px-2 py-1 text-left font-medium">Egys.</th>
-                                            <th className="px-2 py-1 text-right font-medium">összesen</th>
+                                            <th className="px-2 py-1 text-right font-medium whitespace-nowrap">Menny.</th>
+                                            <th className="px-2 py-1 text-left font-medium whitespace-nowrap">Egys.</th>
+                                            <th className="px-2 py-1 text-right font-medium whitespace-nowrap">Anyag e.ár</th>
+                                            <th className="px-2 py-1 text-right font-medium whitespace-nowrap">Díj e.ár</th>
+                                            <th className="px-2 py-1 text-right font-medium whitespace-nowrap">Összesen</th>
                                           </tr>
                                         </thead>
                                         <tbody>
@@ -996,6 +1384,8 @@ function PreviewStep({
                                                 <td className="px-2 py-0.5 text-[var(--slate-700)] max-w-[180px] truncate" title={item.name}>{item.name}</td>
                                                 <td className="px-2 py-0.5 text-right tabular-nums text-[var(--slate-600)]">{item.quantity}</td>
                                                 <td className="px-2 py-0.5 text-[var(--slate-500)]">{item.unit}</td>
+                                                <td className="px-2 py-0.5 text-right tabular-nums text-[var(--slate-600)]">{fmt(item.materialUnitPrice)}</td>
+                                                <td className="px-2 py-0.5 text-right tabular-nums text-[var(--slate-600)]">{fmt(item.feeUnitPrice)}</td>
                                                 <td className="px-2 py-0.5 text-right tabular-nums text-[var(--slate-600)]">{fmt(item.materialTotal + item.feeTotal)}</td>
                                               </tr>
                                             );
@@ -1049,8 +1439,8 @@ function PreviewStep({
         </div>
       )}
 
-      {/* Warnings */}
-      {allWarnings.length > 0 && (
+      {/* Validation issues */}
+      {totalIssueCount > 0 && (
         <div className="border border-amber-200 rounded-lg overflow-hidden">
           <button
             onClick={onToggleWarnings}
@@ -1058,27 +1448,15 @@ function PreviewStep({
           >
             <AlertTriangle size={12} className="text-amber-500" />
             <span className="text-xs text-amber-700 font-medium flex-1 text-left">
-              {allWarnings.length} figyelmeztetés
+              {totalIssueCount} import ellenőrzési hiba
             </span>
             {showWarnings ? <ChevronDown size={12} className="text-amber-400" /> : <ChevronRight size={12} className="text-amber-400" />}
           </button>
           {showWarnings && (
-            <div className="max-h-60 overflow-y-auto border-t border-amber-200">
-              {loadedFiles
-                .filter((f) => f.parseResult.warnings.length > 0)
-                .map((f) => (
-                  <div key={f.id} className="border-b border-amber-100 last:border-b-0">
-                    <div className="px-3 py-1.5 bg-amber-50/60 text-[10px] font-medium text-amber-800 sticky top-0">
-                      {f.fileName} <span className="text-amber-600 font-normal">({f.parseResult.warnings.length})</span>
-                    </div>
-                    {f.parseResult.warnings.map((w, i) => (
-                      <div key={i} className="px-3 py-1 text-[10px] border-t border-amber-100/70">
-                        <span className="text-amber-600 font-mono">[{w.sheet} sor {w.row}]</span>{" "}
-                        <span className="text-amber-700">{w.message}</span>
-                      </div>
-                    ))}
-                  </div>
-                ))}
+            <div className="max-h-72 overflow-y-auto border-t border-amber-200 bg-white">
+              <IssueSection title="Excel beolvasási hibák" issues={allReadErrors} />
+              <IssueSection title="Képlet hibák" issues={allFormulaErrors} />
+              <IssueSection title="Tartalmi hibák" issues={previewContentErrors} />
             </div>
           )}
         </div>
@@ -1093,7 +1471,7 @@ function PreviewStep({
             className="flex items-center gap-1.5 px-5 py-2 rounded-lg bg-[var(--indigo-600)] text-white text-xs font-medium hover:bg-[var(--indigo-700)] transition-colors disabled:opacity-50 cursor-pointer"
           >
             {loading ? <Loader2 size={12} className="animate-spin" /> : null}
-            Tovább a beállításokhoz ({selectedCount} tétel)
+            Importálás indítása ({selectedCount} tétel)
           </button>
         </div>
       )}
@@ -1101,68 +1479,278 @@ function PreviewStep({
   );
 }
 
-function ConfigStep({
-  existingVersions,
+function IssueSection({
+  title,
+  issues,
+}: {
+  title: string;
+  issues: Array<ParseIssue | VersionImportIssue>;
+}) {
+  if (issues.length === 0) return null;
+
+  return (
+    <div className="border-b border-amber-100 last:border-b-0">
+      <div className="px-3 py-1.5 bg-amber-50/60 text-[10px] font-semibold text-amber-800 sticky top-0">
+        {title} <span className="font-normal text-amber-600">({issues.length})</span>
+      </div>
+      {issues.map((issue, index) => {
+        const location = [
+          issue.fileName,
+          issue.sheet,
+          issue.row ? `sor ${issue.row}` : null,
+        ].filter(Boolean).join(" · ");
+        const details = "details" in issue ? issue.details : undefined;
+
+        if ("priceRows" in issue && issue.priceRows && issue.priceRows.length > 0) {
+          const priceRows = issue.priceRows;
+          return (
+            <div key={`${title}-${index}`} className="px-3 py-3 border-t border-amber-100/70 bg-white">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.6px] text-amber-700">
+                Különböző egységárakon szereplő tétel
+              </div>
+              <div className="mt-1 text-xs font-semibold text-[var(--slate-800)]">
+                {issue.message}
+              </div>
+              {issue.description && (
+                <div className="mt-1 text-[11px] text-[var(--slate-600)]">
+                  {issue.description}
+                </div>
+              )}
+              {issue.totalDifference && (
+                <div className="mt-2 inline-flex rounded-[6px] bg-amber-100 px-2 py-1 text-[11px] font-semibold text-amber-900">
+                  Szumma plusz: {issue.totalDifference}
+                </div>
+              )}
+              <div className="mt-2 overflow-x-auto rounded-[6px] border border-[var(--slate-200)]">
+                <table className="w-full min-w-[760px] text-[11px]">
+                  <thead className="bg-[var(--slate-50)] text-[var(--slate-500)]">
+                    <tr>
+                      <th className="px-2 py-1.5 text-left font-medium">Fájl</th>
+                      <th className="px-2 py-1.5 text-left font-medium">Kategóriák</th>
+                      <th className="px-2 py-1.5 text-right font-medium">Mennyiség</th>
+                      <th className="px-2 py-1.5 text-right font-medium">Anyag egységár</th>
+                      <th className="px-2 py-1.5 text-right font-medium">Díj egységár</th>
+                      <th className="px-2 py-1.5 text-right font-medium">Különbség</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {priceRows.map((row, rowIndex) => (
+                      <tr key={rowIndex} className="border-t border-[var(--slate-100)] text-[var(--slate-700)]">
+                        <td className="px-2 py-1.5 align-top">
+                          <div className="max-w-[210px] truncate" title={row.fileName}>{row.fileName ?? "-"}</div>
+                          {row.source && <div className="mt-0.5 text-[10px] text-[var(--slate-400)]">{row.source}</div>}
+                        </td>
+                        <td className="px-2 py-1.5 align-top">
+                          <div className="max-w-[260px] truncate" title={row.categoryPath}>{row.categoryPath}</div>
+                        </td>
+                        <td className="px-2 py-1.5 text-right align-top tabular-nums">{row.quantity}</td>
+                        <td className="px-2 py-1.5 text-right align-top tabular-nums">{row.materialUnitPrice}</td>
+                        <td className="px-2 py-1.5 text-right align-top tabular-nums">{row.feeUnitPrice}</td>
+                        <td className="px-2 py-1.5 text-right align-top tabular-nums font-semibold text-amber-800">{row.difference}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div key={`${title}-${index}`} className="px-3 py-1.5 text-[10px] border-t border-amber-100/70 bg-white">
+            {location && <div className="text-amber-600 font-mono mb-0.5">[{location}]</div>}
+            <div className="text-amber-800">{issue.message}</div>
+            {details && details.length > 0 && (
+              <ul className="mt-1 space-y-0.5 text-amber-700">
+                {details.map((detail, detailIndex) => (
+                  <li key={detailIndex}>{detail}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TargetStep({
+  projects,
+  budgets,
+  versions,
   partners,
+  selectedProjectId,
+  selectedBudgetId,
   versionName,
   versionType,
   parentId,
   partnerId,
-  itemCount,
+  loading,
+  loadingBudgets,
+  loadingVersions,
+  error,
+  onProjectIdChange,
+  onBudgetIdChange,
   onVersionNameChange,
   onVersionTypeChange,
   onParentIdChange,
   onPartnerIdChange,
-  onBack,
-  onImport,
+  onContinue,
 }: {
-  existingVersions: VersionInfo[];
+  projects: ProjectOption[];
+  budgets: BudgetOption[];
+  versions: VersionInfo[];
   partners: { id: number; name: string }[];
+  selectedProjectId: number | null;
+  selectedBudgetId: number | null;
   versionName: string;
   versionType: VersionType;
   parentId: number | null;
   partnerId: number | null;
-  itemCount: number;
-  onVersionNameChange: (v: string) => void;
-  onVersionTypeChange: (v: VersionType) => void;
-  onParentIdChange: (v: number | null) => void;
-  onPartnerIdChange: (v: number | null) => void;
-  onBack: () => void;
-  onImport: () => void;
+  loading: boolean;
+  loadingBudgets: boolean;
+  loadingVersions: boolean;
+  error: string | null;
+  onProjectIdChange: (value: number | null) => void;
+  onBudgetIdChange: (value: number | null) => void;
+  onVersionNameChange: (value: string) => void;
+  onVersionTypeChange: (value: VersionType) => void;
+  onParentIdChange: (value: number | null) => void;
+  onPartnerIdChange: (value: number | null) => void;
+  onContinue: () => void;
 }) {
-  const hasVersions = existingVersions.length > 0;
+  const hasVersions = versions.length > 0;
+  const canContinue = !loading && !loadingBudgets && !loadingVersions;
 
   return (
-    <div className="p-5 space-y-5">
+    <div className="p-5 space-y-5 max-w-3xl">
       <div>
         <h3 className="text-sm font-semibold text-[var(--slate-800)] mb-1">
-          Verzió beállításai
+          Import célja
         </h3>
         <p className="text-xs text-[var(--slate-500)]">
-          Add meg az importált verzió adatait, majd indítsd el az importálást.
+          A projekt, költségvetés és szülő verzió kiválasztása után az Excel ellenőrzések már ehhez a verziófához készülnek.
         </p>
       </div>
 
-      {/* Version name */}
-      <div>
-        <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
-          Verzió neve *
-        </label>
-        <input
-          type="text"
-          value={versionName}
-          onChange={(e) => onVersionNameChange(e.target.value)}
-          placeholder="pl. Eredeti szerződött"
-          className="w-full px-3 py-2 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)]"
-        />
+      {error && (
+        <div className="flex items-start gap-2 px-4 py-3 rounded-lg bg-red-50 border border-red-200">
+          <XCircle size={16} className="text-red-500 mt-0.5 shrink-0" />
+          <p className="text-sm text-red-700">{error}</p>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
+            Projekt *
+          </label>
+          <select
+            value={selectedProjectId ?? ""}
+            onChange={(event) => onProjectIdChange(event.target.value ? Number(event.target.value) : null)}
+            disabled={loading}
+            className="w-full h-9 px-3 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)] disabled:bg-[var(--slate-50)]"
+          >
+            <option value="">Válassz projektet…</option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.projectCode ? `${project.projectCode} ` : ""}{project.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
+            Költségvetés *
+          </label>
+          <select
+            value={selectedBudgetId ?? ""}
+            onChange={(event) => onBudgetIdChange(event.target.value ? Number(event.target.value) : null)}
+            disabled={loading || loadingBudgets || !selectedProjectId}
+            className="w-full h-9 px-3 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)] disabled:bg-[var(--slate-50)]"
+          >
+            <option value="">{loadingBudgets ? "Költségvetések betöltése…" : "Válassz költségvetést…"}</option>
+            {budgets.map((budget) => (
+              <option key={budget.id} value={budget.id}>{budget.name}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
-      {/* Version type */}
+      <div>
+        <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
+          <GitBranch size={10} className="inline mr-1" />
+          {hasVersions ? "Szülő verzió *" : "Szülő verzió"}
+        </label>
+        {!selectedBudgetId ? (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--slate-50)] border border-[var(--slate-200)] text-xs text-[var(--slate-500)]">
+            <Info size={12} />
+            Előbb válassz költségvetést.
+          </div>
+        ) : loadingVersions ? (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--slate-50)] border border-[var(--slate-200)] text-xs text-[var(--slate-500)]">
+            <Loader2 size={12} className="animate-spin" />
+            Verziók betöltése…
+          </div>
+        ) : !hasVersions ? (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--emerald-50)] border border-[var(--emerald-200)] text-xs text-[var(--emerald-700)]">
+            <CheckCircle2 size={12} />
+            Gyökér verzióként jön létre, mert még nincs meglévő verzió.
+          </div>
+        ) : (
+          <select
+            value={parentId ?? ""}
+            onChange={(event) => onParentIdChange(event.target.value ? Number(event.target.value) : null)}
+            className="w-full h-9 px-3 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)]"
+          >
+            <option value="">Válassz szülő verziót…</option>
+            {versions.map((version) => (
+              <option key={version.id} value={version.id}>
+                {version.versionName} ({version.versionType === "contracted" ? "Szerződött" : version.versionType === "unpriced" ? "Árazatlan" : "Ajánlati"})
+                {version.partnerName ? ` - ${version.partnerName}` : ""}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
+            Verzió neve *
+          </label>
+          <input
+            type="text"
+            value={versionName}
+            onChange={(event) => onVersionNameChange(event.target.value)}
+            placeholder="pl. Importált ajánlat"
+            className="w-full h-9 px-3 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)]"
+          />
+        </div>
+
+        <div>
+          <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
+            Partner (opcionális)
+          </label>
+          <select
+            value={partnerId ?? ""}
+            onChange={(event) => onPartnerIdChange(event.target.value ? Number(event.target.value) : null)}
+            className="w-full h-9 px-3 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)]"
+          >
+            <option value="">Nincs partner</option>
+            {partners.map((partner) => (
+              <option key={partner.id} value={partner.id}>{partner.name}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       <div>
         <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
           Verzió típusa
         </label>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => onVersionTypeChange("offer")}
             className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium border transition-colors cursor-pointer ${
@@ -1199,88 +1787,17 @@ function ConfigStep({
         </div>
       </div>
 
-      {/* Parent version */}
-      <div>
-        <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
-          <GitBranch size={10} className="inline mr-1" />
-          {hasVersions ? "Szülő verzió *" : "Szülő verzió"}
-        </label>
-        {!hasVersions ? (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--emerald-50)] border border-[var(--emerald-200)] text-xs text-[var(--emerald-700)]">
-            <CheckCircle2 size={12} />
-            Gyökér verzió — nincs meglévő verzió, ez lesz az első.
-          </div>
-        ) : (
-          <select
-            value={parentId ?? ""}
-            onChange={(e) =>
-              onParentIdChange(e.target.value ? Number(e.target.value) : null)
-            }
-            className="w-full px-3 py-2 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)]"
-          >
-            <option value="">Válassz szALlL� verziót…</option>
-            {existingVersions.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.versionName} ({v.versionType === "contracted" ? "Szerződött" : v.versionType === "unpriced" ? "Árazatlan" : "Ajánlati"})
-                {v.partnerName ? ` — ${v.partnerName}` : ""}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
-
-      {/* Partner */}
-      <div>
-        <label className="block text-[10px] font-semibold text-[var(--slate-400)] uppercase tracking-[0.8px] mb-1.5">
-          Partner (opcionális)
-        </label>
-        <select
-          value={partnerId ?? ""}
-          onChange={(e) =>
-            onPartnerIdChange(e.target.value ? Number(e.target.value) : null)
-          }
-          className="w-full px-3 py-2 text-sm border border-[var(--slate-200)] rounded-lg focus:outline-none focus:ring-2 focus:ring-[var(--indigo-500)] focus:border-transparent bg-white text-[var(--slate-800)]"
-        >
-          <option value="">Nincs partner</option>
-          {partners.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* Summary before import */}
-      <div className="flex items-start gap-2 px-4 py-3 rounded-lg bg-[var(--slate-50)] border border-[var(--slate-200)]">
-        <Info size={14} className="text-[var(--slate-400)] mt-0.5 shrink-0" />
-        <div className="text-xs text-[var(--slate-600)] space-y-0.5">
-          <p>Az importálás <strong>{itemCount} kijelA�lt tételt</strong> fog lA�trehozni az új verzióban.</p>
-          {hasVersions && parentId && (
-            <p>
-              Szülő verzió:{" "}
-              <strong>{existingVersions.find((v) => v.id === parentId)?.versionName}</strong>
-            </p>
-          )}
-        </div>
-      </div>
-
-      {/* Actions */}
-      <div className="flex items-center justify-between pt-3 border-t border-[var(--slate-100)]">
+      <div className="flex items-center justify-end pt-3 border-t border-[var(--slate-100)]">
         <button
-          onClick={onBack}
-          className="px-4 py-2 text-xs text-[var(--slate-600)] hover:text-[var(--slate-800)] transition-colors cursor-pointer"
-        >
-          ← Vissza a kijelöléshez
-        </button>
-        <button
-          onClick={onImport}
-          disabled={!versionName.trim() || (hasVersions && !parentId)}
+          onClick={onContinue}
+          disabled={!canContinue}
           className="flex items-center gap-1.5 px-5 py-2.5 rounded-lg bg-[var(--indigo-600)] text-white text-sm font-medium hover:bg-[var(--indigo-700)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
         >
-          <Upload size={14} />
-          Importálás
+          {loading ? <Loader2 size={14} className="animate-spin" /> : <FileSpreadsheet size={14} />}
+          Excel import folytatása
         </button>
       </div>
     </div>
   );
 }
+

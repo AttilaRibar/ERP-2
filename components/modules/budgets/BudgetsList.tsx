@@ -50,12 +50,13 @@ export function BudgetsList() {
     load();
   }, [load]);
 
-  const openView = (budgetId: number, name: string) => {
+  const openView = (budgetId: number, name: string, projectName: string | null) => {
     openTab({
       moduleKey: "budgets-detail",
       title: name,
       color: "#f59e0b",
       tabType: "view",
+      subtitle: projectName ?? undefined,
       params: { budgetId },
     });
   };
@@ -184,7 +185,7 @@ export function BudgetsList() {
                   </td>
                   <td className="px-[14px] py-[10px] border-b border-[var(--slate-100)] font-medium">
                     <button
-                      onClick={() => openView(row.id, row.name)}
+                      onClick={() => openView(row.id, row.name, row.projectName)}
                       className="bg-transparent border-none p-0 text-left text-[12.5px] font-medium text-[var(--foreground)] cursor-pointer transition-colors hover:text-[var(--indigo-600)] border-b border-dotted border-transparent hover:border-b hover:border-dotted hover:border-[var(--indigo-600)]"
                     >
                       {row.name}

@@ -1,5 +1,6 @@
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
-import { createAnthropicModel } from "@/lib/agent/llm";
+import { createLangSmithRunConfig } from "@/lib/agent/langsmith";
+import { createOpenRouterModel } from "@/lib/agent/llm";
 import { IMPORT_AGENT_SYSTEM_PROMPT } from "@/lib/agent/prompts/import-agent.prompt";
 import {
   ImportMappingPlanSchema,
@@ -24,6 +25,7 @@ export interface PlanImportInput {
 
 const SAMPLE_ROW_LIMIT = 20;
 const MAX_TOKENS = 2_000;
+const AGENT_NAME = "erp-import-planner";
 
 function buildUserMessage(input: PlanImportInput): string {
   return [
@@ -49,16 +51,30 @@ function buildUserMessage(input: PlanImportInput): string {
 export async function planAgenticImport(
   input: PlanImportInput,
 ): Promise<ImportMappingPlan> {
-  const model = createAnthropicModel({ temperature: 0, maxTokens: MAX_TOKENS });
+  const model = createOpenRouterModel({ temperature: 0, maxTokens: MAX_TOKENS });
   const structured = model.withStructuredOutput<ImportMappingPlan>(
     ImportMappingPlanSchema,
     { name: "ImportMappingPlan" },
   );
 
-  const result = await structured.invoke([
-    new SystemMessage(IMPORT_AGENT_SYSTEM_PROMPT),
-    new HumanMessage(buildUserMessage(input)),
-  ]);
+  const result = await structured.invoke(
+    [
+      new SystemMessage(IMPORT_AGENT_SYSTEM_PROMPT),
+      new HumanMessage(buildUserMessage(input)),
+    ],
+    createLangSmithRunConfig({
+      runName: "erp-import-planner.mapping-plan",
+      agentName: AGENT_NAME,
+      tags: ["import", "structured-output"],
+      metadata: {
+        workflow: "agentic-import-plan",
+        file_name: input.fileName,
+        sheet_count: input.sheetNames.length,
+        header_count: input.headers.length,
+        sample_row_count: Math.min(input.sampleRows.length, SAMPLE_ROW_LIMIT),
+      },
+    }),
+  );
 
   return ImportMappingPlanSchema.parse(result);
 }

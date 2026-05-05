@@ -1,7 +1,8 @@
 import { AIMessage, HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
 import { createAgentTraceHandler } from "@/lib/agent/debug/trace-handler";
-import { createAnthropicModel, DEFAULT_ANTHROPIC_MODEL } from "@/lib/agent/llm";
+import { createLangSmithRunConfig } from "@/lib/agent/langsmith";
+import { createOpenRouterModel, DEFAULT_OPENROUTER_MODEL } from "@/lib/agent/llm";
 import {
   CHAT_AGENT_RESPONSE_FORMAT_PROMPT,
   CHAT_AGENT_SYSTEM_PROMPT,
@@ -90,9 +91,8 @@ function buildHumanContent(content: string, attachments?: AgentFileAttachment[])
 
 /**
  * Builds the HumanMessage for the *current* turn. PDF attachments with base64
- * payload are forwarded to Claude as native `document` content blocks so the
- * model can read text + images directly. Other attachment types remain inside
- * the textual prompt block produced by `buildAttachmentBlock`.
+ * payload are forwarded to OpenRouter as OpenAI-compatible `file` content
+ * blocks. Other attachment types remain inside the textual prompt block.
  */
 function buildCurrentTurnHumanMessage(input: InvokeErpChatAgentInput): HumanMessage {
   const text = `${buildRuntimeContext(input)}\n\n${buildHumanContent(input.message, input.attachments)}`;
@@ -104,15 +104,13 @@ function buildCurrentTurnHumanMessage(input: InvokeErpChatAgentInput): HumanMess
     return new HumanMessage(text);
   }
 
-  // Anthropic multimodal content array — LangChain passes blocks through.
+  // OpenRouter file content block; LangChain passes provider-specific blocks through.
   const blocks: Array<Record<string, unknown>> = pdfDocs.map((file) => ({
-    type: "document",
-    source: {
-      type: "base64",
-      media_type: "application/pdf",
-      data: file.base64 as string,
+    type: "file",
+    file: {
+      filename: file.name,
+      file_data: `data:${file.mediaType};base64,${file.base64 as string}`,
     },
-    title: file.name,
   }));
   blocks.push({ type: "text", text });
 
@@ -196,9 +194,10 @@ function serializeFormatterTranscript(messages: BaseMessage[]): string {
 async function formatAgentResponse(
   messages: BaseMessage[],
   callbacks: ReturnType<typeof createAgentTraceHandler>[] = [],
+  traceMetadata: Record<string, unknown> = {},
 ): Promise<AiJsonResponse> {
   const finalAnswer = extractFinalAssistantText(messages);
-  const formatter = createAnthropicModel({
+  const formatter = createOpenRouterModel({
     temperature: 0,
     maxTokens: FORMATTER_MAX_TOKENS,
   }).withStructuredOutput<AiJsonResponse>(AiJsonResponseSchema, {
@@ -219,7 +218,17 @@ async function formatAgentResponse(
         ].join("\n"),
       ),
     ],
-    callbacks.length > 0 ? { callbacks } : undefined,
+    createLangSmithRunConfig({
+      runName: "erp-chat-agent.format-response",
+      agentName: AGENT_NAME,
+      tags: ["formatter", "structured-output"],
+      metadata: {
+        workflow: "chat-response-formatting",
+        model: DEFAULT_OPENROUTER_MODEL,
+        ...traceMetadata,
+      },
+      callbacks,
+    }),
   );
 
   return AiJsonResponseSchema.parse(formatted);
@@ -230,13 +239,13 @@ async function formatAgentResponse(
 // ---------------------------------------------------------------------------
 
 /**
- * Invokes the main ERP chat agent through LangGraph + Anthropic.
+ * Invokes the main ERP chat agent through LangGraph + OpenRouter.
  *
  * Pipeline (per-turn):
  *   1. ReAct loop: tool-using agent answers in free-form Hungarian.
  *   2. A separate structured-output call reshapes the conversation into
  *      `AiJsonResponseSchema`. The formatter prompt ends with a human message,
- *      which avoids Anthropic assistant-prefill errors.
+ *      which keeps structured output provider-compatible.
  *
  * Every invocation is audited via `agent_runs`.
  */
@@ -256,7 +265,7 @@ export async function invokeErpChatAgent(
     ...excel.tools,
   ];
 
-  const model = createAnthropicModel({
+  const model = createOpenRouterModel({
     temperature: AGENT_TEMPERATURE,
     maxTokens: AGENT_MAX_TOKENS,
   });
@@ -265,7 +274,7 @@ export async function invokeErpChatAgent(
     userId: context.userId,
     sessionId: context.sessionId,
     agentName: AGENT_NAME,
-    model: DEFAULT_ANTHROPIC_MODEL,
+    model: DEFAULT_OPENROUTER_MODEL ?? "openrouter-default",
     inputSummary: `${input.message} | attachments=${input.attachments?.length ?? 0} | web=${input.allowWebSearch}`,
   });
 
@@ -284,13 +293,30 @@ export async function invokeErpChatAgent(
 
     const result = await agent.invoke(
       { messages: buildMessages(input) },
-      {
+      createLangSmithRunConfig({
+        runName: "erp-chat-agent.react-loop",
+        agentName: AGENT_NAME,
+        tags: ["chat", "react", input.allowWebSearch ? "web-search" : "no-web-search"],
+        metadata: {
+          workflow: "erp-chat",
+          run_id: runId,
+          session_id: context.sessionId,
+          user_id: context.userId,
+          model: DEFAULT_OPENROUTER_MODEL,
+          attachment_count: input.attachments?.length ?? 0,
+          history_message_count: input.history?.length ?? 0,
+          web_search_enabled: input.allowWebSearch,
+        },
         recursionLimit: RECURSION_LIMIT,
         callbacks: [trace],
-      },
+      }),
     );
 
-    const response = await formatAgentResponse(result.messages as BaseMessage[], [trace]);
+    const response = await formatAgentResponse(result.messages as BaseMessage[], [trace], {
+      run_id: runId,
+      session_id: context.sessionId,
+      user_id: context.userId,
+    });
 
     // Merge any agent-saved Excel outputs (the formatter step can't see the
     // workbook session store, so we attach them deterministically here).

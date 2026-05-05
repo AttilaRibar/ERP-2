@@ -632,7 +632,7 @@ export function AiAssistant() {
               ERP AI Asszisztens
             </p>
             <p className="text-[11px] text-[var(--slate-400)] truncate">
-              LangChain + Anthropic · Mentett beszélgetések
+              LangChain + OpenRouter · Mentett beszélgetések
             </p>
           </div>
           <button

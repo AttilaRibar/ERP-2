@@ -28,6 +28,9 @@ import {
   Square,
   MinusSquare,
   Calculator,
+  Percent,
+  SlidersHorizontal,
+  Target,
 } from "lucide-react";
 import {
   getVersionItems,
@@ -35,12 +38,17 @@ import {
   getVersionsByBudgetId,
   saveItemsToVersion,
   saveItemsAsNewVersion,
+  createScaledBudgetVersion,
+  type CreateScaledVersionInput,
+  type PriceScalingMode,
   type ReconstructedItem,
   type ReconstructedSection,
   type BudgetItemInput,
   type SectionInput,
+  type VersionInfo,
   type VersionType,
 } from "@/server/actions/versions";
+import { ImportIssuesIndicator } from "./ImportIssuesIndicator";
 
 interface BudgetItemsPanelProps {
   versionId: number;
@@ -54,6 +62,50 @@ interface BudgetItemsPanelProps {
 
 function fmt(n: number): string {
   return new Intl.NumberFormat("hu-HU", { maximumFractionDigits: 2 }).format(n);
+}
+
+function fmtFactor(n: number): string {
+  return new Intl.NumberFormat("hu-HU", { maximumFractionDigits: 6 }).format(n);
+}
+
+function parseDecimalInput(value: string): number | null {
+  const normalized = value.trim().replace(/\s/g, "").replace(",", ".");
+  if (!normalized) return null;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function roundUnitPrice(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
+function calculateScaledTotals(
+  items: ReconstructedItem[],
+  materialMultiplier: number,
+  feeMultiplier: number
+) {
+  return items.reduce(
+    (totals, item) => {
+      totals.material += item.quantity * roundUnitPrice(item.materialUnitPrice * materialMultiplier);
+      totals.fee += item.quantity * roundUnitPrice(item.feeUnitPrice * feeMultiplier);
+      return totals;
+    },
+    { material: 0, fee: 0 }
+  );
+}
+
+function comparableItem(item: ReconstructedItem) {
+  const { id, versionId, ...rest } = item;
+  void id;
+  void versionId;
+  return rest;
+}
+
+function comparableSection(section: ReconstructedSection) {
+  const { id, versionId, ...rest } = section;
+  void id;
+  void versionId;
+  return rest;
 }
 
 type DisplayRow =
@@ -198,6 +250,15 @@ export function BudgetItemsPanel({
   const [isLeaf, setIsLeaf] = useState(true);
   const [showNewVersionDialog, setShowNewVersionDialog] = useState(false);
   const [newVersionName, setNewVersionName] = useState("");
+  const [showScaleDialog, setShowScaleDialog] = useState(false);
+  const [scaleMode, setScaleMode] = useState<PriceScalingMode>("target-total");
+  const [scaledVersionName, setScaledVersionName] = useState("");
+  const [scaleTargetTotal, setScaleTargetTotal] = useState("");
+  const [scaleReductionPercent, setScaleReductionPercent] = useState("10");
+  const [scaleMaterialMultiplier, setScaleMaterialMultiplier] = useState("0.9");
+  const [scaleFeeMultiplier, setScaleFeeMultiplier] = useState("0.9");
+  const [scaleError, setScaleError] = useState<string | null>(null);
+  const [creatingScaledVersion, setCreatingScaledVersion] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [editingSectionCode, setEditingSectionCode] = useState<string | null>(null);
   const [editSectionName, setEditSectionName] = useState("");
@@ -207,6 +268,7 @@ export function BudgetItemsPanel({
   const [expandedAlts, setExpandedAlts] = useState<Set<string>>(new Set());
   const [hoveredAltBadge, setHoveredAltBadge] = useState<string | null>(null);
   const [versionNotes, setVersionNotes] = useState<string | null>(null);
+  const [versionImportIssues, setVersionImportIssues] = useState<VersionInfo["importIssues"]>(null);
   const [selMatItems, setSelMatItems] = useState<Set<string>>(new Set());
   const [selFeeItems, setSelFeeItems] = useState<Set<string>>(new Set());
   const [selMatSections, setSelMatSections] = useState<Set<string>>(new Set());
@@ -233,6 +295,7 @@ export function BudgetItemsPanel({
     const currentVersion = versionsList.find((v) => v.id === versionId);
     setIsLeaf(currentVersion ? !currentVersion.hasChildren : true);
     setVersionNotes(currentVersion?.notes ?? null);
+    setVersionImportIssues(currentVersion?.importIssues ?? null);
     setOriginalItems(items);
     setWorkingItems(items);
     setOriginalSections(sections);
@@ -250,11 +313,11 @@ export function BudgetItemsPanel({
     if (originalItems.length !== workingItems.length) return true;
     if (originalSections.length !== workingSections.length) return true;
     const itemsMatch =
-      JSON.stringify(originalItems.map(({ id, versionId: _v, ...r }) => r)) ===
-      JSON.stringify(workingItems.map(({ id, versionId: _v, ...r }) => r));
+      JSON.stringify(originalItems.map(comparableItem)) ===
+      JSON.stringify(workingItems.map(comparableItem));
     const sectionsMatch =
-      JSON.stringify(originalSections.map(({ id, versionId: _v, ...r }) => r)) ===
-      JSON.stringify(workingSections.map(({ id, versionId: _v, ...r }) => r));
+      JSON.stringify(originalSections.map(comparableSection)) ===
+      JSON.stringify(workingSections.map(comparableSection));
     return !itemsMatch || !sectionsMatch;
   }, [originalItems, workingItems, originalSections, workingSections]);
 
@@ -348,6 +411,74 @@ export function BudgetItemsPanel({
   );
   const grandTotal = materialTotal + feeTotal;
 
+  const sourceMaterialTotal = useMemo(
+    () => originalItems.reduce((sum, item) => sum + item.quantity * item.materialUnitPrice, 0),
+    [originalItems]
+  );
+  const sourceFeeTotal = useMemo(
+    () => originalItems.reduce((sum, item) => sum + item.quantity * item.feeUnitPrice, 0),
+    [originalItems]
+  );
+  const sourceGrandTotal = sourceMaterialTotal + sourceFeeTotal;
+
+  const scalePreview = useMemo(() => {
+    let materialMultiplier: number | null = null;
+    let feeMultiplier: number | null = null;
+    let targetTotal: number | null = null;
+
+    if (scaleMode === "target-total") {
+      targetTotal = parseDecimalInput(scaleTargetTotal);
+      if (targetTotal === null) return { valid: false, error: "Adjon meg cél végösszeget" } as const;
+      if (targetTotal < 0) return { valid: false, error: "A cél végösszeg nem lehet negatív" } as const;
+      if (sourceGrandTotal <= 0) return { valid: false, error: "Nulla forrás végösszeg nem skálázható célösszegre" } as const;
+      const multiplier = targetTotal / sourceGrandTotal;
+      materialMultiplier = multiplier;
+      feeMultiplier = multiplier;
+    }
+
+    if (scaleMode === "total-percent") {
+      const reductionPercent = parseDecimalInput(scaleReductionPercent);
+      if (reductionPercent === null) return { valid: false, error: "Adjon meg csökkentési százalékot" } as const;
+      if (reductionPercent < 0 || reductionPercent > 100) return { valid: false, error: "A csökkentés 0 és 100% között lehet" } as const;
+      const multiplier = (100 - reductionPercent) / 100;
+      materialMultiplier = multiplier;
+      feeMultiplier = multiplier;
+    }
+
+    if (scaleMode === "material-fee-multiplier") {
+      materialMultiplier = parseDecimalInput(scaleMaterialMultiplier);
+      feeMultiplier = parseDecimalInput(scaleFeeMultiplier);
+      if (materialMultiplier === null || feeMultiplier === null) return { valid: false, error: "Adja meg az anyag és díj szorzót" } as const;
+      if (materialMultiplier < 0 || feeMultiplier < 0) return { valid: false, error: "A szorzó nem lehet negatív" } as const;
+    }
+
+    if (materialMultiplier === null || feeMultiplier === null) {
+      return { valid: false, error: "Hiányzó skálázási adat" } as const;
+    }
+
+    const projectedTotals = calculateScaledTotals(originalItems, materialMultiplier, feeMultiplier);
+    const projectedGrandTotal = projectedTotals.material + projectedTotals.fee;
+    const expectedTotal = targetTotal ?? projectedGrandTotal;
+
+    return {
+      valid: true,
+      materialMultiplier,
+      feeMultiplier,
+      projectedMaterialTotal: projectedTotals.material,
+      projectedFeeTotal: projectedTotals.fee,
+      projectedGrandTotal,
+      roundingDelta: expectedTotal - projectedGrandTotal,
+    } as const;
+  }, [
+    originalItems,
+    scaleFeeMultiplier,
+    scaleMaterialMultiplier,
+    scaleMode,
+    scaleReductionPercent,
+    scaleTargetTotal,
+    sourceGrandTotal,
+  ]);
+
   // --- Selection helpers ---
   const hasSelection = selMatItems.size > 0 || selFeeItems.size > 0;
 
@@ -365,10 +496,22 @@ export function BudgetItemsPanel({
   }, [workingSections]);
 
   type SelChannel = "mat" | "fee";
-  const selItemsFor = (ch: SelChannel) => ch === "mat" ? selMatItems : selFeeItems;
-  const setSelItemsFor = (ch: SelChannel) => ch === "mat" ? setSelMatItems : setSelFeeItems;
-  const selSectionsFor = (ch: SelChannel) => ch === "mat" ? selMatSections : selFeeSections;
-  const setSelSectionsFor = (ch: SelChannel) => ch === "mat" ? setSelMatSections : setSelFeeSections;
+  const selItemsFor = useCallback(
+    (ch: SelChannel) => ch === "mat" ? selMatItems : selFeeItems,
+    [selFeeItems, selMatItems]
+  );
+  const setSelItemsFor = useCallback(
+    (ch: SelChannel) => ch === "mat" ? setSelMatItems : setSelFeeItems,
+    []
+  );
+  const selSectionsFor = useCallback(
+    (ch: SelChannel) => ch === "mat" ? selMatSections : selFeeSections,
+    [selFeeSections, selMatSections]
+  );
+  const setSelSectionsFor = useCallback(
+    (ch: SelChannel) => ch === "mat" ? setSelMatSections : setSelFeeSections,
+    []
+  );
 
   const toggleSelectItem = useCallback((itemCode: string, ch: SelChannel) => {
     const setter = ch === "mat" ? setSelMatItems : setSelFeeItems;
@@ -396,7 +539,7 @@ export function BudgetItemsPanel({
       setSec((prev) => { const next = new Set(prev); allSections.forEach((c) => next.add(c)); return next; });
       setItm((prev) => { const next = new Set(prev); itemCodes.forEach((c) => next.add(c)); return next; });
     }
-  }, [selMatSections, selFeeSections, getItemCodesForSection, getDescendantSectionCodes]);
+  }, [getDescendantSectionCodes, getItemCodesForSection, selSectionsFor, setSelItemsFor, setSelSectionsFor]);
 
   const toggleSelectAll = useCallback((ch: SelChannel) => {
     const nonAltItems = workingItems.filter((i) => !i.alternativeOfItemCode);
@@ -408,7 +551,7 @@ export function BudgetItemsPanel({
       setSelItemsFor(ch)(new Set(nonAltItems.map((i) => i.itemCode)));
       setSelSectionsFor(ch)(new Set(workingSections.map((s) => s.sectionCode)));
     }
-  }, [workingItems, workingSections, selMatItems.size, selFeeItems.size]);
+  }, [selItemsFor, setSelItemsFor, setSelSectionsFor, workingItems, workingSections]);
 
   const clearSelection = useCallback(() => {
     setSelMatItems(new Set());
@@ -424,7 +567,7 @@ export function BudgetItemsPanel({
     const items = selItemsFor(ch);
     const selectedCount = itemCodes.filter((c) => items.has(c)).length;
     return selectedCount > 0 && selectedCount < itemCodes.length;
-  }, [getItemCodesForSection, selMatItems, selFeeItems]);
+  }, [getItemCodesForSection, selItemsFor]);
 
   const selectionMaterialTotal = useMemo(
     () => workingItems.filter((i) => selMatItems.has(i.itemCode)).reduce((sum, i) => sum + i.quantity * i.materialUnitPrice, 0),
@@ -494,6 +637,62 @@ export function BudgetItemsPanel({
       onVersionCreated(result.data.id, result.data.versionName, result.data.versionType, result.data.partnerName);
     } else {
       alert(result.error);
+    }
+  };
+
+  const openScaleDialog = () => {
+    setScaleError(null);
+    setShowScaleDialog(true);
+    setScaledVersionName((current) => current || `${versionName} - skálázott`);
+    if (!scaleTargetTotal && sourceGrandTotal > 0) {
+      setScaleTargetTotal(String(Math.round(sourceGrandTotal * 0.9)));
+    }
+  };
+
+  const handleCreateScaledVersion = async () => {
+    if (!scaledVersionName.trim()) {
+      setScaleError("Az új verzió neve kötelező");
+      return;
+    }
+    if (!scalePreview.valid) {
+      setScaleError(scalePreview.error);
+      return;
+    }
+
+    let payload: CreateScaledVersionInput;
+    if (scaleMode === "target-total") {
+      payload = {
+        versionName: scaledVersionName.trim(),
+        mode: scaleMode,
+        targetTotal: parseDecimalInput(scaleTargetTotal) ?? 0,
+      };
+    } else if (scaleMode === "total-percent") {
+      payload = {
+        versionName: scaledVersionName.trim(),
+        mode: scaleMode,
+        reductionPercent: parseDecimalInput(scaleReductionPercent) ?? 0,
+      };
+    } else {
+      payload = {
+        versionName: scaledVersionName.trim(),
+        mode: scaleMode,
+        materialMultiplier: parseDecimalInput(scaleMaterialMultiplier) ?? 0,
+        feeMultiplier: parseDecimalInput(scaleFeeMultiplier) ?? 0,
+      };
+    }
+
+    setCreatingScaledVersion(true);
+    setScaleError(null);
+    const result = await createScaledBudgetVersion(versionId, payload);
+    setCreatingScaledVersion(false);
+
+    if (result.success && result.data) {
+      setShowScaleDialog(false);
+      setScaledVersionName("");
+      await loadItems();
+      onVersionCreated(result.data.id, result.data.versionName, result.data.versionType, result.data.partnerName);
+    } else {
+      setScaleError(result.error ?? "Nem sikerült létrehozni a skálázott verziót");
     }
   };
 
@@ -705,10 +904,15 @@ export function BudgetItemsPanel({
             <FileText size={10} />
             Ajánlati
           </span>
-        ) : (
+        ) : versionType === "contracted" ? (
           <span className="flex items-center gap-0.5 px-1.5 py-[1px] text-[10px] font-medium rounded bg-[var(--amber-100)] text-[var(--amber-800)]">
             <FileSignature size={10} />
             Szerződött
+          </span>
+        ) : (
+          <span className="flex items-center gap-0.5 px-1.5 py-[1px] text-[10px] font-medium rounded bg-[var(--slate-100)] text-[var(--slate-600)]">
+            <FileText size={10} />
+            Árazatlan
           </span>
         )}
         {partnerName && (
@@ -724,6 +928,7 @@ export function BudgetItemsPanel({
             </span>
           </span>
         )}
+        <ImportIssuesIndicator issues={versionImportIssues} />
         {!isLeaf && (
           <span className="text-[10px] px-1.5 py-[1px] rounded bg-[var(--amber-100)] text-[var(--amber-900)]" title="Ennek a verziónak vannak gyerekverzióit — módosítások csak új verzióba menthetők">
             szülő verzió
@@ -754,6 +959,15 @@ export function BudgetItemsPanel({
             {totalAltCount} alt.
           </button>
         )}
+        <button
+          onClick={openScaleDialog}
+          disabled={originalItems.length === 0 || isDirty}
+          className="flex items-center gap-1.5 px-3 py-[5px] rounded-[6px] text-xs border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+          title={isDirty ? "Mentetlen módosítások mellett előbb mentse a verziót" : "Skálázott új verzió létrehozása"}
+        >
+          <SlidersHorizontal size={12} />
+          Árskálázás
+        </button>
         <>
           <button
             onClick={() => startAddSection(null)}
@@ -830,6 +1044,126 @@ export function BudgetItemsPanel({
           >
             <X size={14} />
           </button>
+        </div>
+      )}
+
+      {/* Scaled version dialog */}
+      {showScaleDialog && (
+        <div className="px-4 py-3 bg-emerald-50 border-b border-emerald-200 shrink-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <SlidersHorizontal size={13} className="text-emerald-700" />
+            <span className="text-xs font-semibold text-emerald-800">Skálázott új verzió</span>
+            <input
+              autoFocus
+              value={scaledVersionName}
+              onChange={(event) => setScaledVersionName(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && handleCreateScaledVersion()}
+              placeholder="Új verzió neve…"
+              className="h-7 px-2 border border-emerald-200 rounded-[6px] text-xs outline-none focus:border-emerald-500 bg-white w-48"
+            />
+            <div className="flex items-center gap-1 rounded-[6px] border border-emerald-200 bg-white p-0.5">
+              <button
+                onClick={() => { setScaleMode("target-total"); setScaleError(null); }}
+                className={`flex items-center gap-1 px-2 py-1 rounded-[5px] text-[11px] cursor-pointer transition-colors ${scaleMode === "target-total" ? "bg-emerald-600 text-white" : "text-emerald-700 hover:bg-emerald-50"}`}
+              >
+                <Target size={11} />
+                Célösszeg
+              </button>
+              <button
+                onClick={() => { setScaleMode("total-percent"); setScaleError(null); }}
+                className={`flex items-center gap-1 px-2 py-1 rounded-[5px] text-[11px] cursor-pointer transition-colors ${scaleMode === "total-percent" ? "bg-emerald-600 text-white" : "text-emerald-700 hover:bg-emerald-50"}`}
+              >
+                <Percent size={11} />
+                %-os
+              </button>
+              <button
+                onClick={() => { setScaleMode("material-fee-multiplier"); setScaleError(null); }}
+                className={`flex items-center gap-1 px-2 py-1 rounded-[5px] text-[11px] cursor-pointer transition-colors ${scaleMode === "material-fee-multiplier" ? "bg-emerald-600 text-white" : "text-emerald-700 hover:bg-emerald-50"}`}
+              >
+                <Calculator size={11} />
+                Anyag/Díj
+              </button>
+            </div>
+
+            {scaleMode === "target-total" && (
+              <label className="flex items-center gap-1 text-[11px] text-emerald-800">
+                Cél végösszeg
+                <input
+                  value={scaleTargetTotal}
+                  onChange={(event) => setScaleTargetTotal(event.target.value)}
+                  inputMode="decimal"
+                  className="h-7 w-28 px-2 border border-emerald-200 rounded-[6px] text-xs outline-none focus:border-emerald-500 bg-white text-right"
+                />
+              </label>
+            )}
+
+            {scaleMode === "total-percent" && (
+              <label className="flex items-center gap-1 text-[11px] text-emerald-800">
+                Csökkentés %
+                <input
+                  value={scaleReductionPercent}
+                  onChange={(event) => setScaleReductionPercent(event.target.value)}
+                  inputMode="decimal"
+                  className="h-7 w-20 px-2 border border-emerald-200 rounded-[6px] text-xs outline-none focus:border-emerald-500 bg-white text-right"
+                />
+              </label>
+            )}
+
+            {scaleMode === "material-fee-multiplier" && (
+              <>
+                <label className="flex items-center gap-1 text-[11px] text-emerald-800">
+                  Anyag
+                  <input
+                    value={scaleMaterialMultiplier}
+                    onChange={(event) => setScaleMaterialMultiplier(event.target.value)}
+                    inputMode="decimal"
+                    className="h-7 w-20 px-2 border border-emerald-200 rounded-[6px] text-xs outline-none focus:border-emerald-500 bg-white text-right"
+                  />
+                </label>
+                <label className="flex items-center gap-1 text-[11px] text-emerald-800">
+                  Díj
+                  <input
+                    value={scaleFeeMultiplier}
+                    onChange={(event) => setScaleFeeMultiplier(event.target.value)}
+                    inputMode="decimal"
+                    className="h-7 w-20 px-2 border border-emerald-200 rounded-[6px] text-xs outline-none focus:border-emerald-500 bg-white text-right"
+                  />
+                </label>
+              </>
+            )}
+
+            <div className="flex-1" />
+
+            {scalePreview.valid && (
+              <div className="flex items-center gap-3 text-[11px] text-emerald-800">
+                <span>Szorzó: A {fmtFactor(scalePreview.materialMultiplier)} / D {fmtFactor(scalePreview.feeMultiplier)}</span>
+                <span>Végösszeg: <strong>{fmt(scalePreview.projectedGrandTotal)}</strong></span>
+                {Math.abs(scalePreview.roundingDelta) >= 0.01 && (
+                  <span className="text-amber-700">Eltérés: {fmt(scalePreview.roundingDelta)}</span>
+                )}
+              </div>
+            )}
+
+            <button
+              onClick={handleCreateScaledVersion}
+              disabled={creatingScaledVersion || !scaledVersionName.trim() || !scalePreview.valid}
+              className="flex items-center gap-1 px-3 py-[5px] rounded-[6px] text-xs bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            >
+              <Check size={12} />
+              {creatingScaledVersion ? "Létrehozás…" : "Létrehozás"}
+            </button>
+            <button
+              onClick={() => { setShowScaleDialog(false); setScaleError(null); }}
+              className="p-1 text-emerald-600 hover:text-emerald-900 cursor-pointer"
+            >
+              <X size={14} />
+            </button>
+          </div>
+          {(scaleError || !scalePreview.valid) && (
+            <div className="mt-2 text-[11px] text-red-600">
+              {scaleError ?? scalePreview.error}
+            </div>
+          )}
         </div>
       )}
 
@@ -954,7 +1288,7 @@ export function BudgetItemsPanel({
               </tr>
             </thead>
             <tbody>
-              {displayRows.map((row, rowIdx) => {
+              {displayRows.map((row) => {
                 if (row.type === "section") {
                   const sec = row.section;
                   const isCollapsed = collapsedSections.has(sec.sectionCode);

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, Trophy, ChevronDown, ChevronRight, ChevronUp, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff, X, GripVertical, Pin, Save } from "lucide-react";
+import { ArrowLeft, Trophy, ChevronDown, ChevronRight, ChevronUp, BarChart3, Layers, AlertTriangle, ArrowUpDown, MessageSquare, EyeOff, X, GripVertical, Pin, Save, Download, Loader2 } from "lucide-react";
 import {
   compareMultipleVersions,
   type MultiComparisonResult,
@@ -27,6 +27,20 @@ function fmt(n: number): string {
 
 function fmtDetailed(n: number): string {
   return new Intl.NumberFormat("hu-HU", { maximumFractionDigits: 2 }).format(n);
+}
+
+function fileNameFromDisposition(header: string | null, fallback: string): string {
+  if (!header) return fallback;
+  const utf8Match = header.match(/filename\*=UTF-8''([^;]+)/);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return fallback;
+    }
+  }
+  const plainMatch = header.match(/filename="?([^";]+)"?/);
+  return plainMatch?.[1] ?? fallback;
 }
 
 type ViewMode = "overview" | "sections" | "variance";
@@ -275,18 +289,6 @@ function OverviewView({
 // ---- Sections View (category-level comparison) ----
 
 type PriceField = "combined" | "material" | "fee";
-
-function flattenSections(
-  totals: SectionTotals[],
-  depth: number = 0
-): { section: SectionTotals; depth: number }[] {
-  const result: { section: SectionTotals; depth: number }[] = [];
-  for (const t of totals) {
-    result.push({ section: t, depth });
-    result.push(...flattenSections(t.children, depth + 1));
-  }
-  return result;
-}
 
 interface UnifiedSection {
   sectionCode: string | null;
@@ -564,8 +566,11 @@ function SectionsView({
   referenceVersionIdx: number | null;
 }) {
   const [priceField, setPriceField] = useState<PriceField>("combined");
-  const visibleEntries = orderedVersions.filter((x) => !hiddenVersionIdxs.has(x.originalIdx));
-  const versions = visibleEntries.map((x) => x.version);
+  const visibleEntries = useMemo(
+    () => orderedVersions.filter((x) => !hiddenVersionIdxs.has(x.originalIdx)),
+    [hiddenVersionIdxs, orderedVersions],
+  );
+  const versions = useMemo(() => visibleEntries.map((x) => x.version), [visibleEntries]);
   const unifiedTree = useMemo(() => buildUnifiedSectionTree(versions), [versions]);
 
   // Map sectionCode → items directly in that section
@@ -1574,12 +1579,7 @@ function VarianceView({
   const [tooltip, setTooltip] = useState<ItemTooltipState | null>(null);
   const tooltipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Reset sort when the sorted column becomes hidden
-  useEffect(() => {
-    if (sortByVersion && hiddenVersionIdxs.has(sortByVersion.idx)) {
-      setSortByVersion(null);
-    }
-  }, [hiddenVersionIdxs, sortByVersion]);
+  const activeSortByVersion = sortByVersion && hiddenVersionIdxs.has(sortByVersion.idx) ? null : sortByVersion;
 
   const handleVersionHeaderClick = useCallback((idx: number) => {
     setSortByVersion((prev) => {
@@ -1655,8 +1655,8 @@ function VarianceView({
       });
     }
 
-    if (sortByVersion) {
-      const { idx, dir } = sortByVersion;
+    if (activeSortByVersion) {
+      const { idx, dir } = activeSortByVersion;
       return [...filtered].sort((a, b) => {
         const aPv = a.item.perVersion[idx];
         const bPv = b.item.perVersion[idx];
@@ -1717,7 +1717,7 @@ function VarianceView({
         return bVal - aVal;
       }
     });
-  }, [allVariances, mode, priceField, minSpreadPct, minSpreadTotal, showAll, sortByVersion, hiddenVersionIdxs, skipZero, getFieldVal, getTotalFieldVal]);
+  }, [allVariances, mode, priceField, minSpreadPct, minSpreadTotal, showAll, activeSortByVersion, hiddenVersionIdxs, skipZero, getFieldVal, getTotalFieldVal]);
 
   const versions = result.versions;
   const suspiciousCount = allVariances.filter((v) => v.spreadPctCombined >= 50).length;
@@ -1922,7 +1922,7 @@ function VarianceView({
                   if (hiddenVersionIdxs.has(originalIdx)) return null;
                   const color = getColor(originalIdx);
                   const isRef = originalIdx === referenceVersionIdx;
-                  const isSorted = sortByVersion?.idx === originalIdx;
+                  const isSorted = activeSortByVersion?.idx === originalIdx;
                   return (
                     <th
                       key={v.versionId}
@@ -1931,12 +1931,12 @@ function VarianceView({
                       <button
                         onClick={() => handleVersionHeaderClick(originalIdx)}
                         className="w-full text-right cursor-pointer hover:underline flex items-center justify-end gap-0.5"
-                        title={isSorted ? (sortByVersion!.dir === "asc" ? "Legdrágább elöl (hol volt ez az alvállalkozó a legdrágább) — kattints a fordításhoz" : "Legolcsóbb elöl (hol volt ez az alvállalkozó a legolcsóbb) — kattints az alapértelmezetthez") : `Rendezés szórás szerint: ${v.partnerName ?? v.versionName}`}
+                        title={isSorted ? (activeSortByVersion!.dir === "asc" ? "Legdrágább elöl (hol volt ez az alvállalkozó a legdrágább) — kattints a fordításhoz" : "Legolcsóbb elöl (hol volt ez az alvállalkozó a legolcsóbb) — kattints az alapértelmezetthez") : `Rendezés szórás szerint: ${v.partnerName ?? v.versionName}`}
                       >
                         {isRef && <Pin size={8} className="shrink-0 text-amber-500" />}
                         <span className="truncate text-[10px]">{v.partnerName ?? v.versionName}</span>
                         {isSorted ? (
-                          sortByVersion!.dir === "asc"
+                          activeSortByVersion!.dir === "asc"
                             ? <ChevronUp size={10} className="shrink-0 text-red-500" />
                             : <ChevronDown size={10} className="shrink-0 text-green-600" />
                         ) : (
@@ -2131,6 +2131,8 @@ export function MultiVersionComparison({
   const [saveName, setSaveName] = useState("");
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
   // Version indices hidden from ALL comparison views (uses originalIdx)
   const [hiddenVersionIdxs, setHiddenVersionIdxs] = useState<Set<number>>(
     new Set(initialState?.hiddenVersionIdxs ?? [])
@@ -2195,6 +2197,47 @@ export function MultiVersionComparison({
     () => (result && versionOrder.length > 0 ? versionOrder.map((i) => ({ version: result.versions[i], originalIdx: i })) : []),
     [result, versionOrder],
   );
+
+  const visibleVersionCount = useMemo(
+    () => orderedVersions.filter((entry) => !hiddenVersionIdxs.has(entry.originalIdx)).length,
+    [hiddenVersionIdxs, orderedVersions],
+  );
+
+  const handleExportExcel = useCallback(async () => {
+    if (!result || visibleVersionCount < 2) return;
+    setExporting(true);
+    setExportError(null);
+
+    try {
+      const response = await fetch("/api/budgets/multi-comparison/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          budgetId,
+          versionIds,
+          versionOrder,
+          hiddenVersionIdxs: Array.from(hiddenVersionIdxs),
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: unknown } | null;
+        throw new Error(typeof payload?.error === "string" ? payload.error : "Nem sikerült az ártükör Excel export");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = fileNameFromDisposition(response.headers.get("Content-Disposition"), "artukor.xlsx");
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Nem sikerült az ártükör Excel export");
+    } finally {
+      setExporting(false);
+    }
+  }, [budgetId, hiddenVersionIdxs, result, versionIds, versionOrder, visibleVersionCount]);
 
   useEffect(() => {
     setLoading(true);
@@ -2315,6 +2358,22 @@ export function MultiVersionComparison({
           })}
         </div>
         <div className="flex-1" />
+        <div className="flex items-center gap-2 mr-2">
+          <button
+            onClick={handleExportExcel}
+            disabled={exporting || visibleVersionCount < 2}
+            className="flex items-center gap-1 px-2.5 py-[4px] text-xs border border-[var(--slate-200)] rounded-[6px] text-[var(--slate-600)] hover:bg-[var(--green-50)] hover:text-green-700 hover:border-green-200 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            title={visibleVersionCount < 2 ? "Legalább 2 látható verzió szükséges" : "Ártükör Excel exportálása"}
+          >
+            {exporting ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+            Ártükör Excel
+          </button>
+          {exportError && (
+            <span className="text-[10px] text-red-600 max-w-[220px] truncate" title={exportError}>
+              {exportError}
+            </span>
+          )}
+        </div>
         {/* Skip zero toggle */}
         <label className="flex items-center gap-1.5 text-xs text-[var(--slate-500)] cursor-pointer mr-2" title="0 Ft értékű kategóriák és tételek kihagyása az összehasonlításból">
           <input

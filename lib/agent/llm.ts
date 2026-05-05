@@ -1,25 +1,51 @@
-import { ChatAnthropic } from "@langchain/anthropic";
+import { ChatOpenAI } from "@langchain/openai";
+import {
+  createOpenRouterLangSmithMetadata,
+  ensureLangSmithTracingConfigured,
+} from "@/lib/agent/langsmith";
 
-export const DEFAULT_ANTHROPIC_MODEL =
-  process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5-20250929";
+export const DEFAULT_OPENROUTER_MODEL =
+  process.env.OPENROUTER_MODEL;
 
-interface AnthropicModelOptions {
+const OPENROUTER_BASE_URL =
+  process.env.OPENROUTER_BASE_URL;
+
+interface OpenRouterModelOptions {
   temperature?: number;
   maxTokens?: number;
 }
 
-/** Creates a server-side Anthropic chat model for ERP agents. */
-export function createAnthropicModel(options: AnthropicModelOptions = {}) {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+function buildOpenRouterHeaders(): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const siteUrl = process.env.OPENROUTER_SITE_URL;
+  const appName = process.env.OPENROUTER_APP_NAME;
+
+  if (siteUrl) headers["HTTP-Referer"] = siteUrl;
+  if (appName) headers["X-Title"] = appName;
+
+  return headers;
+}
+
+/** Creates a server-side OpenRouter chat model for ERP agents via LangChain. */
+export function createOpenRouterModel(options: OpenRouterModelOptions = {}) {
+  ensureLangSmithTracingConfigured();
+
+  const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
-    throw new Error("Missing ANTHROPIC_API_KEY environment variable");
+    throw new Error("Missing OPENROUTER_API_KEY environment variable");
   }
 
-  return new ChatAnthropic({
+  return new ChatOpenAI({
     apiKey,
-    model: DEFAULT_ANTHROPIC_MODEL,
+    model: DEFAULT_OPENROUTER_MODEL,
     temperature: options.temperature ?? 0.1,
-    maxTokens: options.maxTokens ?? 4_000,
+    maxTokens: options.maxTokens ?? 4000,
     streaming: false,
+    streamUsage: false,
+    metadata: createOpenRouterLangSmithMetadata(DEFAULT_OPENROUTER_MODEL),
+    configuration: {
+      baseURL: OPENROUTER_BASE_URL,
+      defaultHeaders: buildOpenRouterHeaders(),
+    },
   });
 }
