@@ -2097,6 +2097,31 @@ function VarianceView({
         </div>
       </div>
 
+      {/* Selected rows summary */}
+      {checkedItems.size > 0 && (() => {
+        const selectedSum = sortedVariances
+          .filter((v) => checkedItems.has(v.item.itemCode))
+          .reduce((acc, v) => {
+            if (mode === "percentage") {
+              return acc + (priceField === "combined" ? v.spreadPctCombined : priceField === "material" ? v.spreadPctMaterial : v.spreadPctFee);
+            } else if (mode === "total") {
+              return acc + (priceField === "combined" ? v.spreadCombinedTotal : priceField === "material" ? v.spreadMaterialTotal : v.spreadFeeTotal);
+            } else {
+              return acc + (priceField === "combined" ? v.spreadCombined : priceField === "material" ? v.spreadMaterial : v.spreadFee);
+            }
+          }, 0);
+        const sumLabel = mode === "percentage" ? "Szórás %" : mode === "total" ? "Szumma szórás" : "Szórás Ft";
+        const sumFormatted = mode === "percentage" ? `${selectedSum.toFixed(1)}%` : mode === "total" ? fmt(selectedSum) : fmtDetailed(selectedSum);
+        return (
+          <div className="mt-2 flex items-center gap-3 px-4 py-2.5 bg-[var(--slate-50)] border border-[var(--slate-200)] rounded-lg text-xs">
+            <span className="text-[var(--slate-500)]">
+              <span className="font-semibold text-[var(--slate-700)]">{checkedItems.size}</span> kijelölt tétel — {sumLabel} összege:
+            </span>
+            <span className="font-bold text-base text-[var(--slate-800)]">{sumFormatted}</span>
+          </div>
+        );
+      })()}
+
       {/* Item detail tooltip rendered in a portal to avoid overflow clipping */}
       {typeof document !== "undefined" && tooltip &&
         createPortal(
