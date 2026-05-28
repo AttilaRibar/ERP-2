@@ -31,6 +31,7 @@ import {
   Percent,
   SlidersHorizontal,
   Target,
+  LayoutList,
 } from "lucide-react";
 import {
   getVersionItems,
@@ -112,6 +113,25 @@ type DisplayRow =
   | { type: "section"; section: ReconstructedSection; depth: number }
   | { type: "item"; item: ReconstructedItem; displayIndex: number; isAlternative: boolean; altLabel: string };
 
+interface ConsolidatedItem {
+  key: string;
+  itemNumber: string;
+  name: string;
+  unit: string;
+  totalQuantity: number;
+  materialTotal: number;
+  feeTotal: number;
+  avgMaterialUnitPrice: number;
+  avgFeeUnitPrice: number;
+  hasMultipleMatPrices: boolean;
+  hasMultipleFeePrices: boolean;
+  matPriceBreakdown: Array<{ price: number; quantity: number }>;
+  feePriceBreakdown: Array<{ price: number; quantity: number }>;
+  itemCodes: string[];
+  displayIndex: number;
+  occurrences: Array<{ sectionName: string | null; quantity: number }>;
+}
+
 /**
  * Build display rows: sections → original items only (no alternatives).
  * Alternatives are inserted separately in displayRows based on visibility state.
@@ -186,6 +206,63 @@ function AltTooltip({ alts, originalName }: { alts: ReconstructedItem[]; origina
               <td className="py-1 pr-2 text-right text-[var(--slate-600)]">{fmt(alt.materialUnitPrice)}</td>
               <td className="py-1 pr-2 text-right text-[var(--slate-600)]">{fmt(alt.feeUnitPrice)}</td>
               <td className="py-1 text-right font-medium text-[var(--slate-700)]">{fmt(alt.quantity * (alt.materialUnitPrice + alt.feeUnitPrice))}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SectionOccurrencesTooltip({ occurrences }: { occurrences: Array<{ sectionName: string | null; quantity: number }> }) {
+  const grouped = new Map<string, number>();
+  for (const occ of occurrences) {
+    const key = occ.sectionName ?? "Kategória nélkül";
+    grouped.set(key, (grouped.get(key) ?? 0) + occ.quantity);
+  }
+  return (
+    <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-teal-200 rounded-lg shadow-lg p-3 min-w-[220px] max-w-[360px] pointer-events-none">
+      <div className="text-[10px] font-semibold text-teal-700 uppercase tracking-wide mb-2">
+        Előfordul ezekben
+      </div>
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="text-[9px] text-[var(--slate-400)] uppercase">
+            <th className="text-left pb-1 pr-3">Kategória</th>
+            <th className="text-right pb-1">Menny.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {Array.from(grouped.entries()).map(([name, qty], i) => (
+            <tr key={i} className="border-t border-teal-100">
+              <td className="py-1 pr-3 text-[var(--slate-700)] max-w-[260px] truncate">{name}</td>
+              <td className="py-1 text-right text-[var(--slate-600)] whitespace-nowrap">{fmt(qty)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function MultiPriceTooltip({ breakdown, label }: { breakdown: Array<{ price: number; quantity: number }>; label: string }) {
+  return (
+    <div className="absolute right-0 top-full mt-1 z-50 bg-white border border-amber-200 rounded-lg shadow-lg p-3 min-w-[220px] pointer-events-none">
+      <div className="text-[10px] font-semibold text-amber-700 uppercase tracking-wide mb-2">
+        {label} — több féle áron
+      </div>
+      <table className="w-full text-[11px]">
+        <thead>
+          <tr className="text-[9px] text-[var(--slate-400)] uppercase">
+            <th className="text-right pb-1 pr-3">Egységár</th>
+            <th className="text-right pb-1">Mennyiség</th>
+          </tr>
+        </thead>
+        <tbody>
+          {breakdown.map((b, i) => (
+            <tr key={i} className="border-t border-amber-100">
+              <td className="py-1 pr-3 text-right font-medium text-[var(--slate-700)]">{fmt(b.price)}</td>
+              <td className="py-1 text-right text-[var(--slate-600)]">{fmt(b.quantity)}</td>
             </tr>
           ))}
         </tbody>
@@ -273,6 +350,7 @@ export function BudgetItemsPanel({
   const [selFeeItems, setSelFeeItems] = useState<Set<string>>(new Set());
   const [selMatSections, setSelMatSections] = useState<Set<string>>(new Set());
   const [selFeeSections, setSelFeeSections] = useState<Set<string>>(new Set());
+  const [showConsolidated, setShowConsolidated] = useState(false);
 
   const [addForm, setAddForm] = useState({
     itemNumber: "",
@@ -322,6 +400,88 @@ export function BudgetItemsPanel({
   }, [originalItems, workingItems, originalSections, workingSections]);
 
   const altsMap = useMemo(() => buildAltsMap(workingItems), [workingItems]);
+
+  const consolidatedItems = useMemo((): ConsolidatedItem[] => {
+    const sectionNameMap = new Map(workingSections.map((s) => [s.sectionCode, s.name]));
+
+    type GroupData = {
+      itemNumber: string;
+      name: string;
+      unit: string;
+      itemCodes: string[];
+      totalQuantity: number;
+      materialTotal: number;
+      feeTotal: number;
+      matPriceMap: Map<number, number>;
+      feePriceMap: Map<number, number>;
+      occurrences: Array<{ sectionName: string | null; quantity: number }>;
+    };
+    const map = new Map<string, GroupData>();
+
+    for (const item of workingItems) {
+      if (item.alternativeOfItemCode) continue;
+      const key = `${item.itemNumber}\x00${item.name}`;
+      let group = map.get(key);
+      if (!group) {
+        group = {
+          itemNumber: item.itemNumber,
+          name: item.name,
+          unit: item.unit,
+          itemCodes: [],
+          totalQuantity: 0,
+          materialTotal: 0,
+          feeTotal: 0,
+          matPriceMap: new Map(),
+          feePriceMap: new Map(),
+          occurrences: [],
+        };
+        map.set(key, group);
+      }
+      group.itemCodes.push(item.itemCode);
+      group.totalQuantity += item.quantity;
+      group.materialTotal += item.quantity * item.materialUnitPrice;
+      group.feeTotal += item.quantity * item.feeUnitPrice;
+      group.matPriceMap.set(item.materialUnitPrice, (group.matPriceMap.get(item.materialUnitPrice) ?? 0) + item.quantity);
+      group.feePriceMap.set(item.feeUnitPrice, (group.feePriceMap.get(item.feeUnitPrice) ?? 0) + item.quantity);
+      group.occurrences.push({
+        sectionName: item.sectionCode ? (sectionNameMap.get(item.sectionCode) ?? null) : null,
+        quantity: item.quantity,
+      });
+    }
+
+    let displayIndex = 0;
+    return Array.from(map.entries()).map(([key, group]) => {
+      displayIndex++;
+      const avgMat = group.totalQuantity > 0 ? group.materialTotal / group.totalQuantity : 0;
+      const avgFee = group.totalQuantity > 0 ? group.feeTotal / group.totalQuantity : 0;
+      return {
+        key,
+        itemNumber: group.itemNumber,
+        name: group.name,
+        unit: group.unit,
+        totalQuantity: group.totalQuantity,
+        materialTotal: group.materialTotal,
+        feeTotal: group.feeTotal,
+        avgMaterialUnitPrice: avgMat,
+        avgFeeUnitPrice: avgFee,
+        hasMultipleMatPrices: group.matPriceMap.size > 1,
+        hasMultipleFeePrices: group.feePriceMap.size > 1,
+        matPriceBreakdown: Array.from(group.matPriceMap.entries()).map(([price, quantity]) => ({ price, quantity })),
+        feePriceBreakdown: Array.from(group.feePriceMap.entries()).map(([price, quantity]) => ({ price, quantity })),
+        itemCodes: group.itemCodes,
+        displayIndex,
+        occurrences: group.occurrences,
+      };
+    });
+  }, [workingItems, workingSections]);
+
+  const consolidatedFiltered = useMemo(() => {
+    if (!searchQuery.trim()) return consolidatedItems;
+    const q = searchQuery.toLowerCase();
+    return consolidatedItems.filter(
+      (ci) => ci.name.toLowerCase().includes(q) || ci.itemNumber.toLowerCase().includes(q)
+    );
+  }, [consolidatedItems, searchQuery]);
 
   const totalAltCount = useMemo(
     () => workingItems.filter((i) => i.alternativeOfItemCode).length,
@@ -558,6 +718,28 @@ export function BudgetItemsPanel({
     setSelFeeItems(new Set());
     setSelMatSections(new Set());
     setSelFeeSections(new Set());
+  }, []);
+
+  const getConsolidatedSelState = useCallback((itemCodes: string[], ch: SelChannel): "all" | "partial" | "none" => {
+    const selSet = ch === "mat" ? selMatItems : selFeeItems;
+    const count = itemCodes.filter((c) => selSet.has(c)).length;
+    if (count === 0) return "none";
+    if (count === itemCodes.length) return "all";
+    return "partial";
+  }, [selFeeItems, selMatItems]);
+
+  const toggleSelectConsolidated = useCallback((itemCodes: string[], ch: SelChannel) => {
+    const setter = ch === "mat" ? setSelMatItems : setSelFeeItems;
+    setter((prev) => {
+      const next = new Set(prev);
+      const allSelected = itemCodes.every((c) => next.has(c));
+      if (allSelected) {
+        itemCodes.forEach((c) => next.delete(c));
+      } else {
+        itemCodes.forEach((c) => next.add(c));
+      }
+      return next;
+    });
   }, []);
 
   /** Check if a section is partially selected for a channel */
@@ -960,6 +1142,18 @@ export function BudgetItemsPanel({
           </button>
         )}
         <button
+          onClick={() => setShowConsolidated((v) => !v)}
+          className={`flex items-center gap-1.5 px-3 py-[5px] rounded-[6px] text-xs border cursor-pointer transition-colors ${
+            showConsolidated
+              ? "border-teal-400 bg-teal-50 text-teal-700"
+              : "border-[var(--slate-300)] text-[var(--slate-600)] hover:bg-[var(--slate-50)]"
+          }`}
+          title={showConsolidated ? "Visszatérés kategória nézetbe" : "Összesített nézet: minden tétel egyszer, kategóriák nélkül"}
+        >
+          <LayoutList size={12} />
+          Összesített
+        </button>
+        <button
           onClick={openScaleDialog}
           disabled={originalItems.length === 0 || isDirty}
           className="flex items-center gap-1.5 px-3 py-[5px] rounded-[6px] text-xs border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
@@ -1250,7 +1444,7 @@ export function BudgetItemsPanel({
           <div className="flex items-center justify-center h-32 text-sm text-[var(--slate-400)]">
             Nincsenek tételek ebben a verzióban
           </div>
-        ) : displayRows.length === 0 ? (
+        ) : (showConsolidated ? consolidatedFiltered.length === 0 : displayRows.length === 0) ? (
           <div className="flex items-center justify-center h-32 text-sm text-[var(--slate-400)]">
             Nincs találat: &ldquo;{searchQuery}&rdquo;
           </div>
@@ -1288,7 +1482,74 @@ export function BudgetItemsPanel({
               </tr>
             </thead>
             <tbody>
-              {displayRows.map((row) => {
+              {showConsolidated ? consolidatedFiltered.map((ci) => {
+                const matSelState = getConsolidatedSelState(ci.itemCodes, "mat");
+                const feeSelState = getConsolidatedSelState(ci.itemCodes, "fee");
+                const isAnySelected = matSelState !== "none" || feeSelState !== "none";
+                return (
+                  <tr key={ci.key} className={`hover:[&_td]:bg-[#fafbff] ${isAnySelected ? "[&_td]:bg-indigo-50/60" : ""}`}>
+                    <td className="px-1 py-2 border-b border-[var(--slate-100)] w-14">
+                      <div className="flex items-center gap-0.5 justify-center">
+                        <button onClick={() => toggleSelectConsolidated(ci.itemCodes, "mat")} className="text-[var(--slate-400)] hover:text-[var(--indigo-600)] cursor-pointer flex items-center" title="Anyag">
+                          {matSelState === "all" ? <CheckSquare size={13} className="text-[var(--indigo-600)]" /> : matSelState === "partial" ? <MinusSquare size={13} /> : <Square size={13} />}
+                          <span className="text-[9px] font-bold ml-[1px]">A</span>
+                        </button>
+                        <button onClick={() => toggleSelectConsolidated(ci.itemCodes, "fee")} className="text-[var(--slate-400)] hover:text-[var(--indigo-600)] cursor-pointer flex items-center" title="Díj">
+                          {feeSelState === "all" ? <CheckSquare size={13} className="text-[var(--indigo-600)]" /> : feeSelState === "partial" ? <MinusSquare size={13} /> : <Square size={13} />}
+                          <span className="text-[9px] font-bold ml-[1px]">D</span>
+                        </button>
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)] text-[var(--slate-400)]">{ci.displayIndex}</td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)] font-mono text-[11px]">{ci.itemNumber || "—"}</td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)]">
+                      <span className="flex items-center gap-1.5">
+                        {ci.name}
+                        {ci.itemCodes.length > 1 && (
+                          <span className="group/seclist relative inline-block shrink-0">
+                            <span className="px-1.5 py-[1px] text-[9px] font-medium rounded bg-teal-100 text-teal-700 cursor-default">
+                              {ci.itemCodes.length}×
+                            </span>
+                            <span className="absolute left-0 top-full mt-1 z-50 hidden group-hover/seclist:block">
+                              <SectionOccurrencesTooltip occurrences={ci.occurrences} />
+                            </span>
+                          </span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)] text-right">{fmt(ci.totalQuantity)}</td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)]">{ci.unit}</td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)] text-right">
+                      {ci.hasMultipleMatPrices ? (
+                        <span className="group/matprice relative inline-block">
+                          <span className="text-amber-700 bg-amber-50 px-1 py-0.5 rounded cursor-default underline decoration-dotted decoration-amber-400" title="Több féle egységáron szerepel — hover a részletekért">
+                            ~{fmt(ci.avgMaterialUnitPrice)}
+                          </span>
+                          <span className="absolute right-0 top-full mt-1 z-50 hidden group-hover/matprice:block">
+                            <MultiPriceTooltip breakdown={ci.matPriceBreakdown} label="Anyag egységár" />
+                          </span>
+                        </span>
+                      ) : fmt(ci.avgMaterialUnitPrice)}
+                    </td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)] text-right">
+                      {ci.hasMultipleFeePrices ? (
+                        <span className="group/feeprice relative inline-block">
+                          <span className="text-amber-700 bg-amber-50 px-1 py-0.5 rounded cursor-default underline decoration-dotted decoration-amber-400" title="Több féle egységáron szerepel — hover a részletekért">
+                            ~{fmt(ci.avgFeeUnitPrice)}
+                          </span>
+                          <span className="absolute right-0 top-full mt-1 z-50 hidden group-hover/feeprice:block">
+                            <MultiPriceTooltip breakdown={ci.feePriceBreakdown} label="Díj egységár" />
+                          </span>
+                        </span>
+                      ) : fmt(ci.avgFeeUnitPrice)}
+                    </td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)] text-right font-medium">{fmt(ci.materialTotal)}</td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)] text-right font-medium">{fmt(ci.feeTotal)}</td>
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)]" />
+                    <td className="px-3 py-2 border-b border-[var(--slate-100)]" />
+                  </tr>
+                );
+              }) : displayRows.map((row) => {
                 if (row.type === "section") {
                   const sec = row.section;
                   const isCollapsed = collapsedSections.has(sec.sectionCode);
@@ -1583,11 +1844,16 @@ export function BudgetItemsPanel({
       {/* Footer */}
       <div className="flex items-center px-4 py-[10px] bg-white border-t border-[var(--slate-200)] shrink-0">
         <span className="text-xs text-[var(--slate-400)]">
-          {workingItems.filter((i) => !i.alternativeOfItemCode).length} tétel
-          {workingItems.some((i) => i.alternativeOfItemCode) && (
-            <> · {workingItems.filter((i) => i.alternativeOfItemCode).length} alternatíva</>
-          )}
-          {" "}· {workingSections.length} fejezet
+          {showConsolidated
+            ? <>{consolidatedItems.length} egyedi tétel</>
+            : <>
+                {workingItems.filter((i) => !i.alternativeOfItemCode).length} tétel
+                {workingItems.some((i) => i.alternativeOfItemCode) && (
+                  <> · {workingItems.filter((i) => i.alternativeOfItemCode).length} alternatíva</>
+                )}
+                {" "}· {workingSections.length} fejezet
+              </>
+          }
         </span>
         <div className="flex-1" />
         <span className="text-xs text-[var(--slate-600)] mr-4">
