@@ -186,7 +186,7 @@ export const versions = pgTable(
   ]
 );
 
-export const versionsRelations = relations(versions, ({ one }) => ({
+export const versionsRelations = relations(versions, ({ one, many }) => ({
   budget: one(budgets, {
     fields: [versions.budgetId],
     references: [budgets.id],
@@ -194,6 +194,41 @@ export const versionsRelations = relations(versions, ({ one }) => ({
   partner: one(partners, {
     fields: [versions.partnerId],
     references: [partners.id],
+  }),
+  files: many(versionFiles),
+}));
+
+// ============================================================
+// 5b. VERSION FILES (Verzióhoz mentett eredeti fájlok)
+// ============================================================
+// Stores every original file uploaded during an import (kind = 'import_source'),
+// so the full unfiltered state can be restored later even if items were filtered out.
+// This is separate from versions.originalFileName/originalFilePath, which hold a single
+// manually-replaceable reference file.
+export const versionFiles = pgTable(
+  "version_files",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    versionId: bigint("version_id", { mode: "number" })
+      .notNull()
+      .references(() => versions.id, { onDelete: "cascade" }),
+    fileName: text("file_name").notNull(),
+    filePath: text("file_path").notNull(),
+    fileSize: bigint("file_size", { mode: "number" }).notNull().default(0),
+    contentType: text("content_type"),
+    kind: text("kind").notNull().default("import_source"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+  },
+  (t) => [
+    index("idx_version_files_version_id").on(t.versionId),
+    check("version_files_kind_check", sql`${t.kind} IN ('import_source', 'attachment')`),
+  ]
+);
+
+export const versionFilesRelations = relations(versionFiles, ({ one }) => ({
+  version: one(versions, {
+    fields: [versionFiles.versionId],
+    references: [versions.id],
   }),
 }));
 

@@ -466,6 +466,7 @@ export async function importVersionWithItems(
         notes: created.notes ?? null,
         createdAt: created.createdAt,
         hasChildren: false,
+        sourceFileCount: 0,
       },
     };
   } catch (err) {

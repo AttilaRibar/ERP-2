@@ -1,10 +1,12 @@
 "use server";
 
 import { db } from "@/lib/db";
-import { versions, budgetItems, budgetSections, partners } from "@/lib/db/schema";
+import { versions, budgetItems, budgetSections, partners, versionFiles } from "@/lib/db/schema";
 import { requirePermission } from "@/lib/auth/permissions";
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
+import { s3, BUDGET_FILES_BUCKET } from "@/lib/supabase/storage";
+import { DeleteObjectCommand } from "@aws-sdk/client-s3";
 import type { VersionImportIssues } from "@/types/import-issues";
 
 // ---- Types ----
@@ -48,6 +50,8 @@ export interface VersionInfo {
   notes: string | null;
   createdAt: Date | null;
   hasChildren: boolean;
+  /** Number of original import-source files stored against this version (for restore). */
+  sourceFileCount: number;
 }
 
 export interface ReconstructedSection {
@@ -162,6 +166,10 @@ export async function getVersionsByBudgetId(budgetId: number): Promise<VersionIn
       importIssues: versions.importIssues,
       notes: versions.notes,
       createdAt: versions.createdAt,
+      sourceFileCount: sql<number>`(
+        SELECT COUNT(*)::int FROM version_files vf
+        WHERE vf.version_id = ${versions.id} AND vf.kind = 'import_source'
+      )`,
     })
     .from(versions)
     .leftJoin(partners, eq(versions.partnerId, partners.id))
@@ -176,6 +184,7 @@ export async function getVersionsByBudgetId(budgetId: number): Promise<VersionIn
     ...r,
     versionType: (r.versionType ?? "offer") as VersionType,
     hasChildren: childSet.has(r.id),
+    sourceFileCount: Number(r.sourceFileCount ?? 0),
   }));
 }
 
@@ -426,7 +435,7 @@ export async function createVersion(
 
   return {
     success: true,
-    data: { ...created, notes: created.notes ?? null, versionType: created.versionType as VersionType, partnerName, hasChildren: false },
+    data: { ...created, notes: created.notes ?? null, versionType: created.versionType as VersionType, partnerName, hasChildren: false, sourceFileCount: 0 },
   };
 }
 
@@ -459,6 +468,26 @@ export async function deleteVersionAction(
 
   if (children.length > 0) {
     return { success: false, error: "Nem törölhető: a verziónak vannak gyermekei" };
+  }
+
+  // Best-effort: remove stored files from S3 before deleting DB rows.
+  // ON DELETE CASCADE only clears the version_files rows, not the storage objects.
+  try {
+    const [storedFiles, [version]] = await Promise.all([
+      db.select({ filePath: versionFiles.filePath }).from(versionFiles).where(eq(versionFiles.versionId, versionId)),
+      db.select({ originalFilePath: versions.originalFilePath }).from(versions).where(eq(versions.id, versionId)),
+    ]);
+    const keys = [
+      ...storedFiles.map((f) => f.filePath),
+      ...(version?.originalFilePath ? [version.originalFilePath] : []),
+    ];
+    await Promise.all(
+      keys.map((Key) =>
+        s3.send(new DeleteObjectCommand({ Bucket: BUDGET_FILES_BUCKET, Key })).catch(() => {})
+      )
+    );
+  } catch (err) {
+    console.error("S3 cleanup on version delete failed:", err);
   }
 
   await db.delete(budgetItems).where(eq(budgetItems.versionId, versionId));
@@ -689,7 +718,7 @@ export async function saveItemsAsNewVersion(
 
   return {
     success: true,
-    data: { ...created, versionType: created.versionType as VersionType, partnerName, hasChildren: false },
+    data: { ...created, versionType: created.versionType as VersionType, partnerName, hasChildren: false, sourceFileCount: 0 },
   };
 }
 
@@ -805,6 +834,7 @@ export async function createScaledBudgetVersion(
       versionType: created.versionType as VersionType,
       partnerName,
       hasChildren: false,
+      sourceFileCount: 0,
     },
     summary: {
       sourceMaterialTotal: sourceTotals.material,
