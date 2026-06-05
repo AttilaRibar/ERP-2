@@ -16,7 +16,7 @@ import { SavedComparisons } from "./SavedComparisons";
 type DetailView =
   | { type: "data" }
   | { type: "versions" }
-  | { type: "import" }
+  | { type: "import"; restoreVersionId?: number; restoreVersionName?: string }
   | { type: "comparisons" }
   | { type: "version-items"; versionId: number; versionName: string; versionType: VersionType; partnerName: string | null }
   | { type: "comparison"; versionAId: number; versionBId: number; nameA: string; nameB: string; savedState?: SimpleCompareState }
@@ -143,6 +143,10 @@ export function BudgetDetail({
 
   const handleBackToVersions = useCallback(() => {
     setView({ type: "versions" });
+  }, []);
+
+  const handleRestoreFromFiles = useCallback((versionId: number, versionName: string) => {
+    setView({ type: "import", restoreVersionId: versionId, restoreVersionName: versionName });
   }, []);
 
   const handleOpenComparisonInTab = useCallback(
@@ -339,6 +343,7 @@ export function BudgetDetail({
             onOpenVersion={handleOpenVersion}
             onCompare={handleCompare}
             onMultiCompare={handleMultiCompare}
+            onRestore={handleRestoreFromFiles}
           />
         )}
 
@@ -390,6 +395,8 @@ export function BudgetDetail({
             budgetId={budgetId}
             onClose={() => setView({ type: "versions" })}
             onImported={handleImported}
+            restoreVersionId={view.restoreVersionId}
+            restoreVersionName={view.restoreVersionName}
           />
         )}
       </div>

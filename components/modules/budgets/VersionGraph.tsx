@@ -14,6 +14,8 @@ import {
   Upload,
   Download,
   Paperclip,
+  Files,
+  RotateCcw,
   MessageSquare,
   MoreVertical,
   CheckSquare,
@@ -33,6 +35,8 @@ import {
 import {
   uploadVersionFile,
   getVersionFileDownloadUrl,
+  getVersionFiles,
+  getVersionFileDownloadUrlById,
 } from "@/server/actions/version-files";
 import { ImportIssuesIndicator } from "./ImportIssuesIndicator";
 
@@ -60,6 +64,8 @@ interface VersionGraphProps {
     versionIds: number[],
     versionNames: string[]
   ) => void;
+  /** Open the import wizard preloaded with this version's stored source files to restore its state. */
+  onRestore?: (versionId: number, versionName: string) => void;
 }
 
 interface LayoutNode {
@@ -129,6 +135,7 @@ export function VersionGraph({
   onOpenVersion,
   onCompare,
   onMultiCompare,
+  onRestore,
 }: VersionGraphProps) {
   const [versionsList, setVersionsList] = useState<VersionInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -252,6 +259,27 @@ export function VersionGraph({
       a.click();
     } else {
       alert(result.error ?? "Hiba a letöltés közben");
+    }
+  }, []);
+
+  // Download all original import-source files stored against a version.
+  const handleDownloadSourceFiles = useCallback(async (versionId: number) => {
+    const files = await getVersionFiles(versionId);
+    const sources = files.filter((f) => f.kind === "import_source");
+    if (sources.length === 0) {
+      alert("Nincs mentett eredeti fájl ehhez a verzióhoz.");
+      return;
+    }
+    for (const source of sources) {
+      const dl = await getVersionFileDownloadUrlById(source.id);
+      if (dl.success && dl.url) {
+        const a = document.createElement("a");
+        a.href = dl.url;
+        a.download = dl.fileName ?? source.fileName;
+        a.click();
+        // Brief gap so the browser does not block consecutive downloads.
+        await new Promise((resolve) => setTimeout(resolve, 400));
+      }
     }
   }, []);
 
@@ -652,6 +680,33 @@ export function VersionGraph({
                                   Fájl letöltése
                                 </button>
                               )}
+                              {v.sourceFileCount > 0 && (
+                                <>
+                                  <div className="my-1 border-t border-[var(--slate-100)]" />
+                                  {onRestore && (
+                                    <button
+                                      onClick={() => {
+                                        setOpenMenuId(null);
+                                        onRestore(v.id, v.versionName);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-[var(--slate-700)] hover:bg-[var(--slate-50)] cursor-pointer transition-colors"
+                                    >
+                                      <RotateCcw size={12} className="text-[var(--indigo-500)]" />
+                                      Visszaállítás fájlból
+                                    </button>
+                                  )}
+                                  <button
+                                    onClick={() => {
+                                      setOpenMenuId(null);
+                                      handleDownloadSourceFiles(v.id);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-[var(--slate-700)] hover:bg-[var(--slate-50)] cursor-pointer transition-colors"
+                                  >
+                                    <Files size={12} className="text-[var(--slate-400)]" />
+                                    Eredeti fájlok ({v.sourceFileCount})
+                                  </button>
+                                </>
+                              )}
                               {isLeaf && (
                                 <>
                                   <div className="my-1 border-t border-[var(--slate-100)]" />
@@ -683,16 +738,29 @@ export function VersionGraph({
                           {v.partnerName}
                         </span>
                       )}
-                      {v.originalFileName && (
-                        <span
-                          className={`ml-auto flex items-center gap-0.5 text-[9px] ${
-                            uploadingVersionId === v.id
-                              ? "text-[var(--amber-500)] animate-pulse"
-                              : "text-[var(--slate-400)]"
-                          }`}
-                          title={v.originalFileName}
-                        >
-                          <Paperclip size={9} />
+                      {(v.originalFileName || v.sourceFileCount > 0) && (
+                        <span className="ml-auto flex items-center gap-1.5">
+                          {v.sourceFileCount > 0 && (
+                            <span
+                              className="flex items-center gap-0.5 text-[9px] text-[var(--indigo-400)]"
+                              title={`${v.sourceFileCount} mentett eredeti fájl — visszaállítható`}
+                            >
+                              <Files size={9} />
+                              {v.sourceFileCount}
+                            </span>
+                          )}
+                          {v.originalFileName && (
+                            <span
+                              className={`flex items-center gap-0.5 text-[9px] ${
+                                uploadingVersionId === v.id
+                                  ? "text-[var(--amber-500)] animate-pulse"
+                                  : "text-[var(--slate-400)]"
+                              }`}
+                              title={v.originalFileName}
+                            >
+                              <Paperclip size={9} />
+                            </span>
+                          )}
                         </span>
                       )}
                     </div>

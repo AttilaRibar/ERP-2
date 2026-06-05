@@ -28,6 +28,11 @@ import {
 import { parseExcelBuffer, type ExcelParseResult, type ParseIssue, type ParsedBudgetItem } from "@/lib/import/excel-parser";
 import { mapParsedDataToBudget, type MappedBudgetData } from "@/lib/import/budget-mapper";
 import { importVersionWithItems } from "@/server/actions/import";
+import {
+  uploadImportedVersionFiles,
+  getVersionFiles,
+  getVersionFileDownloadUrlById,
+} from "@/server/actions/version-files";
 import { getBudgets, getBudgetById } from "@/server/actions/budgets";
 import { getProjectsForSelect } from "@/server/actions/projects";
 import {
@@ -53,6 +58,8 @@ type BudgetOption = Awaited<ReturnType<typeof getBudgets>>[number];
 interface LoadedFile {
   id: string;
   fileName: string;
+  /** Raw uploaded file — kept so the original can be saved to the version for later restore */
+  file: File;
   /** Optional override: rename the top-level sections under a single root section */
   rootSectionName: string;
   parseResult: ExcelParseResult;
@@ -379,9 +386,12 @@ interface ImportPanelProps {
     targetBudgetId: number,
     targetBudgetName: string | null,
   ) => void;
+  /** When set, preload this version's stored source files to restore its full imported state. */
+  restoreVersionId?: number;
+  restoreVersionName?: string | null;
 }
 
-export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps) {
+export function ImportPanel({ budgetId, onClose, onImported, restoreVersionId, restoreVersionName }: ImportPanelProps) {
   const [step, setStep] = useState<ImportStep>("target");
   const [dragOver, setDragOver] = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
@@ -418,6 +428,13 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
   const [filteredResult, setFilteredResult] = useState<ExcelParseResult | null>(null);
   const [mappedData, setMappedData] = useState<MappedBudgetData | null>(null);
   const [importIssues, setImportIssues] = useState<VersionImportIssues>(buildEmptyImportIssues());
+  const [fileSaveWarning, setFileSaveWarning] = useState<string | null>(null);
+
+  // Restore-from-file state (only used when restoreVersionId is set)
+  const [restoreLoading, setRestoreLoading] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [restoreWarning, setRestoreWarning] = useState<string | null>(null);
+  const restoreInitiatedRef = useRef(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -561,6 +578,7 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
         newLoaded.push({
           id: crypto.randomUUID(),
           fileName: file.name,
+          file,
           rootSectionName: "",
           parseResult: result,
         });
@@ -718,6 +736,7 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
 
     setStep("importing");
     setImportError(null);
+    setFileSaveWarning(null);
 
     try {
       const result = await importVersionWithItems({
@@ -732,6 +751,31 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
       });
 
       if (result.success && result.data) {
+        // Auto-save the original uploaded files to the version so the full
+        // (unfiltered) state can be restored later, even if items were filtered out.
+        if (loadedFiles.length > 0) {
+          try {
+            const formData = new FormData();
+            for (const f of loadedFiles) {
+              formData.append("files", f.file, f.fileName);
+            }
+            const saveResult = await uploadImportedVersionFiles(result.data.id, formData);
+            if (!saveResult.success) {
+              setFileSaveWarning(
+                `${saveResult.error ?? "Az eredeti fájlok mentése nem sikerült."} — a verzió fájlból nem lesz visszaállítható.`,
+              );
+            } else if (saveResult.error) {
+              // Some files saved, some failed (partial).
+              setFileSaveWarning(`${saveResult.error} — a hiányzó fájlok nem lesznek visszaállíthatók.`);
+            }
+          } catch (saveErr) {
+            setFileSaveWarning(
+              `Az eredeti fájlok mentése nem sikerült${
+                saveErr instanceof Error ? `: ${saveErr.message}` : ""
+              } — a verzió fájlból nem lesz visszaállítható.`,
+            );
+          }
+        }
         setImportedVersion(result.data);
         setStep("done");
       } else {
@@ -742,7 +786,7 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
       setImportError(err instanceof Error ? err.message : "Ismeretlen hiba");
       setStep("error");
     }
-  }, [parentId, partnerId, selectedBudgetId, versionName, versionType]);
+  }, [loadedFiles, parentId, partnerId, selectedBudgetId, versionName, versionType]);
 
   // Build filtered result + mapped data, then import into the already selected target.
   const handlePreviewContinue = useCallback(async () => {
@@ -760,6 +804,56 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
   }, [loadedFiles, selection, startImport]);
 
   const selectedCount = useMemo(() => countSelected(loadedFiles, selection), [loadedFiles, selection]);
+
+  // Restore mode: download the version's stored source files and preload them into the wizard.
+  // Guarded by a ref so it runs exactly once (also under React StrictMode's dev double-invoke).
+  useEffect(() => {
+    if (!restoreVersionId || restoreInitiatedRef.current) return;
+    restoreInitiatedRef.current = true;
+
+    async function preloadRestoreFiles(sourceVersionId: number) {
+      setRestoreLoading(true);
+      setRestoreError(null);
+      setVersionName(restoreVersionName ? `${restoreVersionName} (visszaállítva)` : "Visszaállított verzió");
+      setParentId(sourceVersionId);
+      try {
+        const files = await getVersionFiles(sourceVersionId);
+        const sources = files.filter((f) => f.kind === "import_source");
+        if (sources.length === 0) {
+          setRestoreError("Ehhez a verzióhoz nincs mentett eredeti fájl, így nem állítható vissza.");
+          return;
+        }
+
+        const fetched: File[] = [];
+        let failed = 0;
+        for (const source of sources) {
+          const dl = await getVersionFileDownloadUrlById(source.id);
+          if (!dl.success || !dl.url) { failed++; continue; }
+          const resp = await fetch(dl.url);
+          if (!resp.ok) { failed++; continue; }
+          const blob = await resp.blob();
+          fetched.push(new File([blob], source.fileName, { type: dl.contentType ?? blob.type }));
+        }
+
+        if (fetched.length === 0) {
+          setRestoreError("A mentett eredeti fájlok letöltése nem sikerült.");
+          return;
+        }
+        if (failed > 0) {
+          setRestoreWarning(
+            `${fetched.length}/${sources.length} eredeti fájl töltődött be — ${failed} fájl letöltése nem sikerült, így a visszaállítás hiányos lehet.`,
+          );
+        }
+        await addFiles(fetched);
+      } catch (err) {
+        setRestoreError(err instanceof Error ? err.message : "Hiba a visszaállítás előkészítése közben.");
+      } finally {
+        setRestoreLoading(false);
+      }
+    }
+
+    void preloadRestoreFiles(restoreVersionId);
+  }, [restoreVersionId, restoreVersionName, addFiles]);
 
   // ---- RENDER ----
 
@@ -788,7 +882,37 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        {step === "target" && (
+        {restoreWarning && (
+          <div className="m-5 mb-0 flex items-start gap-2 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200">
+            <AlertTriangle size={16} className="text-amber-500 mt-0.5 shrink-0" />
+            <p className="text-sm text-amber-700">{restoreWarning}</p>
+          </div>
+        )}
+        {restoreLoading && (
+          <div className="flex flex-col items-center justify-center p-12 gap-4">
+            <Loader2 size={36} className="animate-spin text-[var(--indigo-500)]" />
+            <p className="text-sm text-[var(--slate-600)]">Eredeti fájlok betöltése a visszaállításhoz…</p>
+            <p className="text-xs text-[var(--slate-400)]">A mentett forrásfájlok alapján visszaállítjuk a teljes állapotot.</p>
+          </div>
+        )}
+
+        {restoreError && !restoreLoading && (
+          <div className="flex flex-col items-center justify-center p-12 gap-4">
+            <div className="w-14 h-14 rounded-full bg-red-100 flex items-center justify-center">
+              <XCircle size={28} className="text-red-500" />
+            </div>
+            <h3 className="text-base font-semibold text-[var(--slate-800)]">Visszaállítás nem lehetséges</h3>
+            <p className="text-sm text-red-600 text-center max-w-sm">{restoreError}</p>
+            <button
+              onClick={onClose}
+              className="mt-2 px-4 py-2 rounded-lg border border-[var(--slate-200)] text-sm text-[var(--slate-700)] hover:bg-[var(--slate-50)] transition-colors cursor-pointer"
+            >
+              Bezárás
+            </button>
+          </div>
+        )}
+
+        {step === "target" && !restoreLoading && !restoreError && (
           <TargetStep
             projects={projects}
             budgets={budgetOptions}
@@ -876,6 +1000,20 @@ export function ImportPanel({ budgetId, onClose, onImported }: ImportPanelProps)
               <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
                 <AlertTriangle size={13} />
                 Az import ellenőrzési hibái mentve lettek a verzióhoz.
+              </div>
+            )}
+            {loadedFiles.length > 0 && !fileSaveWarning && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--emerald-50)] border border-[var(--emerald-200)] text-xs text-[var(--emerald-700)]">
+                <CheckCircle2 size={13} />
+                {loadedFiles.length === 1
+                  ? "Az eredeti fájl mentve a verzióhoz — később visszaállítható."
+                  : `${loadedFiles.length} eredeti fájl mentve a verzióhoz — később visszaállítható.`}
+              </div>
+            )}
+            {fileSaveWarning && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
+                <AlertTriangle size={13} />
+                {fileSaveWarning}
               </div>
             )}
             <button
