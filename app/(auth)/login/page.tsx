@@ -1,9 +1,10 @@
-import { AlertCircle } from "lucide-react";
+import { LoginForm } from "./LoginForm";
 
 const ERROR_MESSAGES: Record<string, string> = {
-  state_mismatch: "Biztonsági hiba (CSRF). Kérjük, próbálja újra.",
   missing_code: "Hiányzó hitelesítési kód. Kérjük, próbálja újra.",
-  token_exchange_failed: "A token csere sikertelen. Ellenőrizze a Cognito callback URL beállítást.",
+  code_exchange_failed:
+    "A hitelesítés nem sikerült. Kérjen új linket, vagy jelentkezzen be jelszóval.",
+  session_expired: "A munkamenet lejárt. Kérjük, jelentkezzen be újra.",
 };
 
 function getErrorMessage(raw: string): string {
@@ -39,26 +40,8 @@ export default async function LoginPage({
         </div>
 
         {/* Card */}
-        <div className="bg-[var(--slate-800)] border border-[var(--slate-700)] rounded-2xl p-6 shadow-xl flex flex-col gap-4">
-          {/* Error message */}
-          {errorMessage && (
-            <div className="flex items-start gap-2.5 bg-red-950/60 border border-red-700/50 text-red-300 text-[13px] px-4 py-3 rounded-lg">
-              <AlertCircle size={15} className="mt-0.5 shrink-0" />
-              {errorMessage}
-            </div>
-          )}
-
-          <p className="text-[13px] text-[var(--slate-400)] text-center">
-            A bejelentkezés az AWS Cognito azonosítóján keresztül történik.
-          </p>
-
-          {/* Redirect to Cognito Hosted UI */}
-          <a
-            href="/api/auth/login"
-            className="h-10 bg-[var(--indigo-600)] hover:bg-[var(--indigo-500)] text-white text-[13px] font-medium rounded-lg transition-colors flex items-center justify-center gap-2"
-          >
-            Bejelentkezés
-          </a>
+        <div className="bg-[var(--slate-800)] border border-[var(--slate-700)] rounded-2xl p-6 shadow-xl">
+          <LoginForm initialError={errorMessage} />
         </div>
 
         <p className="text-center text-[12px] text-[var(--slate-500)] mt-6">

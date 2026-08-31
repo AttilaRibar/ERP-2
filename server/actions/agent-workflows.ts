@@ -20,7 +20,7 @@ export type AgentWorkflowResult<T> =
 async function requireLoggedInUser(): Promise<string> {
   const session = await getCurrentUser();
   if (!session) throw new Error("UNAUTHORIZED");
-  return session.user.sub;
+  return session.user.id;
 }
 
 /** Runs the dedicated import planner agent. It returns a mapping plan only. */

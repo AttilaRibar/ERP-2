@@ -17,7 +17,7 @@ export type AgentProposalActionResult<T = void> =
 
 async function getCurrentUserId(): Promise<string | null> {
   const session = await getCurrentUser();
-  return session?.user.sub ?? null;
+  return session?.user.id ?? null;
 }
 
 /** Loads one proposal and its operation rows for the current user. */

@@ -87,7 +87,7 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const userId = session.user.sub;
+  const userId = session.user.id;
   const processedFiles = await processAgentFileAttachments(files ?? [], {
     userId,
     sessionId,

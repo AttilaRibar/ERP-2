@@ -8,7 +8,7 @@
 
 /** Runtime context every agent tool needs to enforce RBAC and audit. */
 export interface AgentToolContext {
-  /** Cognito subject of the user the agent acts on behalf of. */
+  /** Supabase user ID (`auth.users.id`) the agent acts on behalf of. */
   userId: string;
   /** Stable agent-side conversation/session ID (used for memory + audit). */
   sessionId: string;

@@ -2,6 +2,84 @@ This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-
 
 ## Getting Started
 
+## Supabase
+
+The whole backend runs on Supabase: Postgres (through Drizzle ORM), Supabase
+Auth for sign-in and RBAC, and Supabase Storage for uploaded budget files.
+There is no AWS dependency any more.
+
+Add these to `.env.local`:
+
+```bash
+# Postgres (Supabase → Project Settings → Database → Connection string)
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@<host>:6543/postgres
+
+# Supabase project (Project Settings → API)
+NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
+SUPABASE_SECRET_KEY=sb_secret_...
+
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+
+# Subcontractor settle portal session signing key
+SETTLE_JWT_SECRET=<random 32+ char string>
+```
+
+The legacy key names `NEXT_PUBLIC_SUPABASE_ANON_KEY` and
+`SUPABASE_SERVICE_ROLE_KEY` are still accepted. Never expose the secret
+(service-role) key with a `NEXT_PUBLIC_` prefix — it bypasses RLS.
+
+### Authentication
+
+Sign-in is e-mail + password through Supabase Auth:
+
+- `/login` posts to the `loginAction` Server Action, which calls
+  `supabase.auth.signInWithPassword()`. `@supabase/ssr` stores the session in
+  httpOnly `sb-*` cookies.
+- `proxy.ts` runs before every request, verifies the access token with
+  `supabase.auth.getClaims()` (locally against the project JWKS when asymmetric
+  signing keys are enabled), refreshes it when needed, and forwards the user
+  context to Server Components and Server Actions as `x-user-*` headers.
+- `/api/auth/callback` exchanges a PKCE `code` for a session, so magic links,
+  invitations, password recovery and OAuth providers work. Register
+  `${NEXT_PUBLIC_APP_URL}/api/auth/callback` under **Authentication → URL
+  Configuration → Redirect URLs** in the Supabase dashboard.
+- Logging out calls `supabase.auth.signOut()`, which clears the cookies.
+
+Create users in the Supabase dashboard (**Authentication → Users**) or with the
+secret key via `supabase.auth.admin`.
+
+### Roles and permissions
+
+RBAC roles live in the user's `app_metadata`, so they travel inside the access
+token. The available roles are `erp-admin`, `erp-manager`, `erp-accountant` and
+`erp-viewer` — the permission map is in `lib/auth/permissions.ts`.
+
+```sql
+UPDATE auth.users
+   SET raw_app_meta_data =
+         COALESCE(raw_app_meta_data, '{}'::jsonb)
+         || '{"erp_roles": ["erp-admin"]}'::jsonb
+ WHERE email = 'user@example.com';
+```
+
+The user has to sign in again for a role change to take effect. In development,
+a signed-in user with no roles is treated as `erp-admin`.
+
+### Storage
+
+Uploaded budget and import source files go to the `budget-files` bucket via the
+Supabase Storage API (`lib/supabase/storage.ts`). Create the bucket as
+**private** — downloads are handed out as 60-second signed URLs.
+
+### Database migrations
+
+SQL files live in `db/migrations/`, with a matching runner in `scripts/`:
+
+```bash
+DATABASE_URL=... node scripts/migrate-018.mjs
+```
+
 ## AI Provider
 
 The ERP assistant uses LangChain with OpenRouter's OpenAI-compatible API.

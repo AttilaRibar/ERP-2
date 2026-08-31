@@ -9,7 +9,7 @@ export type WorkbookKind = "input" | "output";
 export interface StoredWorkbook {
   /** Stable opaque ID exposed to the agent and the download endpoint. */
   id: string;
-  /** Owning user (Cognito sub). */
+  /** Owning user (Supabase `auth.users.id`). */
   userId: string;
   /** Owning chat session. */
   sessionId: string;

@@ -2,10 +2,12 @@
 
 import { db } from "@/lib/db";
 import { versions, versionFiles } from "@/lib/db/schema";
-import { s3, BUDGET_FILES_BUCKET } from "@/lib/supabase/storage";
+import {
+  createSignedDownloadUrl,
+  deleteStorageObject,
+  uploadStorageObject,
+} from "@/lib/supabase/storage";
 import { eq, asc } from "drizzle-orm";
-import { PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50 MB
 
@@ -26,7 +28,7 @@ function sanitizeFileName(name: string): string {
 
 /**
  * Upload an original budget file for a version and store the reference.
- * The file is stored in Supabase Storage (S3) under: budgets/{budgetId}/{versionId}/{filename}
+ * The file is stored in Supabase Storage under: budgets/{budgetId}/{versionId}/{filename}
  */
 export async function uploadVersionFile(
   versionId: number,
@@ -52,7 +54,7 @@ export async function uploadVersionFile(
     return { success: false, error: "A verzió nem található" };
   }
 
-  // Sanitize filename for storage path — S3 keys must be ASCII-safe
+  // Sanitize filename for storage path — Storage keys must be ASCII-safe
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const storagePath = `budgets/${version.budgetId}/${versionId}/${safeName}`;
 
@@ -64,26 +66,17 @@ export async function uploadVersionFile(
 
   if (current?.originalFilePath) {
     try {
-      await s3.send(new DeleteObjectCommand({
-        Bucket: BUDGET_FILES_BUCKET,
-        Key: current.originalFilePath,
-      }));
+      await deleteStorageObject(current.originalFilePath);
     } catch {
       // Ignore delete errors — file may not exist
     }
   }
 
-  // Upload via S3
-  const arrayBuffer = await file.arrayBuffer();
+  // Upload to Supabase Storage
   try {
-    await s3.send(new PutObjectCommand({
-      Bucket: BUDGET_FILES_BUCKET,
-      Key: storagePath,
-      Body: new Uint8Array(arrayBuffer),
-      ContentType: file.type || "application/octet-stream",
-    }));
+    await uploadStorageObject(storagePath, await file.arrayBuffer(), file.type);
   } catch (err) {
-    console.error("S3 upload error:", err);
+    console.error("Supabase Storage upload error:", err);
     return { success: false, error: "Hiba a fájl feltöltése közben" };
   }
 
@@ -118,19 +111,12 @@ export async function getVersionFileDownloadUrl(
     return { success: false, error: "Nincs feltöltött fájl ehhez a verzióhoz" };
   }
 
+  const fileName = version.originalFileName ?? "file";
   try {
-    const url = await getSignedUrl(
-      s3,
-      new GetObjectCommand({
-        Bucket: BUDGET_FILES_BUCKET,
-        Key: version.originalFilePath,
-        ResponseContentDisposition: `attachment; filename="${version.originalFileName ?? "file"}"`,
-      }),
-      { expiresIn: 60 }
-    );
-    return { success: true, url, fileName: version.originalFileName ?? "file" };
+    const url = await createSignedDownloadUrl(version.originalFilePath, fileName);
+    return { success: true, url, fileName };
   } catch (err) {
-    console.error("S3 signed URL error:", err);
+    console.error("Supabase Storage signed URL error:", err);
     return { success: false, error: "Hiba a letöltési link generálása közben" };
   }
 }
@@ -151,12 +137,9 @@ export async function deleteVersionFile(
   }
 
   try {
-    await s3.send(new DeleteObjectCommand({
-      Bucket: BUDGET_FILES_BUCKET,
-      Key: version.originalFilePath,
-    }));
+    await deleteStorageObject(version.originalFilePath);
   } catch (err) {
-    console.error("S3 delete error:", err);
+    console.error("Supabase Storage delete error:", err);
     return { success: false, error: "Hiba a fájl törlése közben" };
   }
 
@@ -175,7 +158,7 @@ export async function deleteVersionFile(
 /**
  * Save the original files uploaded during an import, attached to the version.
  * Every file is kept (not just the filtered selection) so the full imported
- * state can be restored later. Files are stored in Supabase Storage (S3) under:
+ * state can be restored later. Files are stored in Supabase Storage under:
  *   budgets/{budgetId}/{versionId}/source/{index}_{filename}
  *
  * The FormData may contain multiple entries under the key "files".
@@ -213,13 +196,7 @@ export async function uploadImportedVersionFiles(
     const storagePath = `budgets/${version.budgetId}/${versionId}/source/${i}_${safeName}`;
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      await s3.send(new PutObjectCommand({
-        Bucket: BUDGET_FILES_BUCKET,
-        Key: storagePath,
-        Body: new Uint8Array(arrayBuffer),
-        ContentType: file.type || "application/octet-stream",
-      }));
+      await uploadStorageObject(storagePath, await file.arrayBuffer(), file.type);
 
       try {
         await db.insert(versionFiles).values({
@@ -232,7 +209,7 @@ export async function uploadImportedVersionFiles(
         });
       } catch (dbErr) {
         // Roll back the just-uploaded object so it does not orphan in storage.
-        await s3.send(new DeleteObjectCommand({ Bucket: BUDGET_FILES_BUCKET, Key: storagePath })).catch(() => {});
+        await deleteStorageObject(storagePath).catch(() => {});
         throw dbErr;
       }
       saved++;
@@ -285,23 +262,15 @@ export async function getVersionFileDownloadUrlById(
   }
 
   try {
-    const url = await getSignedUrl(
-      s3,
-      new GetObjectCommand({
-        Bucket: BUDGET_FILES_BUCKET,
-        Key: file.filePath,
-        ResponseContentDisposition: `attachment; filename="${file.fileName}"`,
-      }),
-      { expiresIn: 60 }
-    );
+    const url = await createSignedDownloadUrl(file.filePath, file.fileName);
     return { success: true, url, fileName: file.fileName, contentType: file.contentType };
   } catch (err) {
-    console.error("S3 signed URL error:", err);
+    console.error("Supabase Storage signed URL error:", err);
     return { success: false, error: "Hiba a letöltési link generálása közben" };
   }
 }
 
-/** Delete a single stored version file (from S3 and the table). */
+/** Delete a single stored version file (from Storage and the table). */
 export async function deleteVersionFileById(
   fileId: number
 ): Promise<{ success: boolean; error?: string }> {
@@ -315,13 +284,10 @@ export async function deleteVersionFileById(
   }
 
   try {
-    await s3.send(new DeleteObjectCommand({
-      Bucket: BUDGET_FILES_BUCKET,
-      Key: file.filePath,
-    }));
+    await deleteStorageObject(file.filePath);
   } catch (err) {
-    console.error("S3 delete error:", err);
-    // Continue to remove the DB row even if S3 delete failed (file may be gone).
+    console.error("Supabase Storage delete error:", err);
+    // Continue to remove the DB row even if the object delete failed (file may be gone).
   }
 
   await db.delete(versionFiles).where(eq(versionFiles.id, fileId));
