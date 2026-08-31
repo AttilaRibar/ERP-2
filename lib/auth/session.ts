@@ -1,60 +1,58 @@
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-import { cookies } from "next/headers";
+import { extractRoles, type ErpRole } from "@/lib/auth/roles";
+import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-export interface CognitoJwtPayload extends JWTPayload {
-  sub: string;
-  email?: string;
-  name?: string;
-  "cognito:groups"?: string[];
-  "cognito:username": string;
-}
-
-/** Lazily-initialized JWKS set — cached across requests via module scope. */
-let JWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
-
-function getJwks() {
-  if (!JWKS) {
-    const region = process.env.AWS_REGION!;
-    const userPoolId = process.env.AWS_COGNITO_USER_POOL_ID!;
-    const url = `https://cognito-idp.${region}.amazonaws.com/${userPoolId}/.well-known/jwks.json`;
-    JWKS = createRemoteJWKSet(new URL(url));
-  }
-  return JWKS;
-}
-
-/**
- * Verifies a Cognito-issued JWT (id_token) against the JWKS endpoint.
- * Returns the decoded payload or null if invalid/expired.
- */
-export async function verifyJwt(
-  token: string
-): Promise<CognitoJwtPayload | null> {
-  try {
-    const region = process.env.AWS_REGION!;
-    const userPoolId = process.env.AWS_COGNITO_USER_POOL_ID!;
-
-    const { payload } = await jwtVerify(token, getJwks(), {
-      issuer: `https://cognito-idp.${region}.amazonaws.com/${userPoolId}`,
-    });
-
-    return payload as CognitoJwtPayload;
-  } catch {
-    return null;
-  }
+/** The signed-in ERP user, derived from the verified Supabase access token. */
+export interface ErpUser {
+  /** Supabase `auth.users.id` — the value stored in every `user_id` column. */
+  id: string;
+  email: string;
+  /** Display name from `user_metadata` (full_name / name), if the user has one. */
+  name: string;
+  /** Roles read from `app_metadata` — the source of truth for RBAC. */
+  roles: ErpRole[];
 }
 
 export interface AuthSession {
-  user: CognitoJwtPayload;
-  /** The raw, JWKS-verified id_token — safe to pass to downstream AWS services. */
-  idToken: string;
+  user: ErpUser;
 }
 
-/** Reads and verifies the id_token cookie. Returns the validated session or null. */
+/** The subset of Supabase JWT claims the app reads. */
+export interface SupabaseClaims {
+  sub: string;
+  email?: string;
+  app_metadata?: Record<string, unknown>;
+  user_metadata?: Record<string, unknown>;
+}
+
+function readString(metadata: Record<string, unknown> | undefined, key: string): string {
+  const value = metadata?.[key];
+  return typeof value === "string" ? value : "";
+}
+
+/** Builds the ERP user object from verified Supabase JWT claims. */
+export function userFromClaims(claims: SupabaseClaims): ErpUser {
+  const userMetadata = claims.user_metadata;
+  return {
+    id: claims.sub,
+    email: typeof claims.email === "string" ? claims.email : readString(userMetadata, "email"),
+    name:
+      readString(userMetadata, "full_name") ||
+      readString(userMetadata, "name") ||
+      readString(userMetadata, "user_name"),
+    roles: extractRoles(claims),
+  };
+}
+
+/**
+ * Reads the Supabase session from the request cookies and verifies the access
+ * token. With asymmetric signing keys the JWT is verified locally (JWKS);
+ * with a legacy symmetric secret Supabase Auth is asked to validate it.
+ *
+ * Returns null when there is no valid session.
+ */
 export async function getCurrentUser(): Promise<AuthSession | null> {
-  const cookieStore = await cookies();
-  const token = cookieStore.get("id_token")?.value;
-  if (!token) return null;
-  const payload = await verifyJwt(token);
-  if (!payload) return null;
-  return { user: payload, idToken: token };
+  const supabase = await createSupabaseServerClient();
+  const { data, error } = await supabase.auth.getClaims();
+  if (error || !data?.claims?.sub) return null;
+  return { user: userFromClaims(data.claims) };
 }

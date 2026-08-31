@@ -20,12 +20,12 @@ async function requireAiChatUser(permission: string): Promise<string> {
   await requirePermission(permission);
   const session = await getCurrentUser();
   if (!session) throw new Error("UNAUTHORIZED");
-  return session.user.sub;
+  return session.user.id;
 }
 
 const RenameSessionTitleSchema = z.string().trim().min(1).max(80);
 
-/** Lists persisted AI assistant sessions for the signed-in Cognito user. */
+/** Lists persisted AI assistant sessions for the signed-in Supabase user. */
 export async function listAiChatSessionsAction(): Promise<
   AiChatActionResult<AiChatSessionSummary[]>
 > {

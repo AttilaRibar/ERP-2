@@ -14,7 +14,7 @@ export const dynamic = "force-dynamic";
  * the user.
  *
  * Security model:
- * - Cognito session required (`getCurrentUser`).
+ * - Supabase Auth session required (`getCurrentUser`).
  * - `ai-chat:write` RBAC.
  * - Workbook ownership enforced inside `getWorkbookForDownload` — a user
  *   can only fetch their own workbooks.
@@ -41,7 +41,7 @@ export async function GET(
   }
 
   const stored = getWorkbookForDownload({
-    userId: session.user.sub,
+    userId: session.user.id,
     workbookId: fileId,
   });
 

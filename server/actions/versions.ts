@@ -5,8 +5,7 @@ import { versions, budgetItems, budgetSections, partners, versionFiles } from "@
 import { requirePermission } from "@/lib/auth/permissions";
 import { eq, sql } from "drizzle-orm";
 import { z } from "zod";
-import { s3, BUDGET_FILES_BUCKET } from "@/lib/supabase/storage";
-import { DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { deleteStorageObjects } from "@/lib/supabase/storage";
 import type { VersionImportIssues } from "@/types/import-issues";
 
 // ---- Types ----
@@ -470,24 +469,20 @@ export async function deleteVersionAction(
     return { success: false, error: "Nem törölhető: a verziónak vannak gyermekei" };
   }
 
-  // Best-effort: remove stored files from S3 before deleting DB rows.
+  // Best-effort: remove stored objects from Supabase Storage before deleting DB rows.
   // ON DELETE CASCADE only clears the version_files rows, not the storage objects.
   try {
     const [storedFiles, [version]] = await Promise.all([
       db.select({ filePath: versionFiles.filePath }).from(versionFiles).where(eq(versionFiles.versionId, versionId)),
       db.select({ originalFilePath: versions.originalFilePath }).from(versions).where(eq(versions.id, versionId)),
     ]);
-    const keys = [
+    const paths = [
       ...storedFiles.map((f) => f.filePath),
       ...(version?.originalFilePath ? [version.originalFilePath] : []),
     ];
-    await Promise.all(
-      keys.map((Key) =>
-        s3.send(new DeleteObjectCommand({ Bucket: BUDGET_FILES_BUCKET, Key })).catch(() => {})
-      )
-    );
+    await deleteStorageObjects(paths);
   } catch (err) {
-    console.error("S3 cleanup on version delete failed:", err);
+    console.error("Supabase Storage cleanup on version delete failed:", err);
   }
 
   await db.delete(budgetItems).where(eq(budgetItems.versionId, versionId));

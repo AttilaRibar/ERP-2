@@ -12,7 +12,7 @@ interface TopNavProps {
   userEmail?: string;
 }
 
-/** Derives initials from a Cognito username or email. */
+/** Derives initials from a user display name or email. */
 function getInitials(name: string): string {
   if (!name) return "?";
   const parts = name.split(/[.\s_@]+/).filter(Boolean);

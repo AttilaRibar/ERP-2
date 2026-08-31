@@ -253,7 +253,7 @@ async function handleAgentProposal(
     .where(
       and(
         eq(agentProposals.id, proposalId),
-        eq(agentProposals.createdBy, session.user.sub),
+        eq(agentProposals.createdBy, session.user.id),
       ),
     );
 
@@ -284,8 +284,8 @@ async function handleAgentProposal(
     .update(agentProposals)
     .set({
       status: "executing",
-      approvedBy: session.user.sub,
-      executedBy: session.user.sub,
+      approvedBy: session.user.id,
+      executedBy: session.user.id,
       approvedAt: new Date(),
       updatedAt: new Date(),
     })

@@ -1,13 +1,10 @@
 import { headers } from "next/headers";
+import { type ErpRole, isErpRole } from "@/lib/auth/roles";
 
-export type CognitoGroup =
-  | "erp-admin"
-  | "erp-manager"
-  | "erp-accountant"
-  | "erp-viewer";
+export type { ErpRole } from "@/lib/auth/roles";
 
-/** Maps Cognito groups to allowed permission strings. */
-export const PERMISSIONS: Record<CognitoGroup, string[]> = {
+/** Maps ERP roles (Supabase `app_metadata.erp_roles`) to permission strings. */
+export const PERMISSIONS: Record<ErpRole, string[]> = {
   "erp-admin": ["*"],
   "erp-manager": [
     "orders:*",
@@ -62,12 +59,9 @@ export const PERMISSIONS: Record<CognitoGroup, string[]> = {
   ],
 };
 
-export function hasPermission(
-  groups: CognitoGroup[],
-  permission: string
-): boolean {
-  return groups.some((group) => {
-    const perms = PERMISSIONS[group] ?? [];
+export function hasPermission(roles: ErpRole[], permission: string): boolean {
+  return roles.some((role) => {
+    const perms = PERMISSIONS[role] ?? [];
     return (
       perms.includes("*") ||
       perms.includes(permission) ||
@@ -76,30 +70,31 @@ export function hasPermission(
   });
 }
 
-/** Reads user groups injected by middleware from request headers. */
-export async function getGroupsFromHeaders(): Promise<CognitoGroup[]> {
+/** Reads the roles injected by the proxy from request headers. */
+export async function getRolesFromHeaders(): Promise<ErpRole[]> {
   const headerStore = await headers();
-  const raw = headerStore.get("x-user-groups");
+  const raw = headerStore.get("x-user-roles");
   if (!raw) return [];
   try {
-    const groups = JSON.parse(raw) as CognitoGroup[];
-    // In development, grant admin if user has no Cognito groups assigned
-    if (groups.length === 0 && process.env.NODE_ENV === "development") {
+    const parsed: unknown = JSON.parse(raw);
+    const roles = Array.isArray(parsed) ? parsed.filter(isErpRole) : [];
+    // In development, grant admin if the Supabase user has no roles assigned
+    if (roles.length === 0 && process.env.NODE_ENV === "development") {
       return ["erp-admin"];
     }
-    return groups;
+    return roles;
   } catch {
     return [];
   }
 }
 
 /**
- * Throws "FORBIDDEN" if the current user (from middleware headers) lacks the
+ * Throws "FORBIDDEN" if the current user (from proxy headers) lacks the
  * required permission. Call at the top of every Server Action.
  */
 export async function requirePermission(permission: string): Promise<void> {
-  const groups = await getGroupsFromHeaders();
-  if (!hasPermission(groups, permission)) {
+  const roles = await getRolesFromHeaders();
+  if (!hasPermission(roles, permission)) {
     throw new Error("FORBIDDEN");
   }
 }

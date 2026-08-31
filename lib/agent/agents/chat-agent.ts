@@ -253,7 +253,7 @@ export async function invokeErpChatAgent(
   input: InvokeErpChatAgentInput,
 ): Promise<AiJsonResponse> {
   const context: AgentToolContext = {
-    userId: input.session.user.sub,
+    userId: input.session.user.id,
     sessionId: input.sessionId,
   };
 
